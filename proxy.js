@@ -8,6 +8,9 @@ export default {
     }
 
     if (url.pathname === "/api/get-token") {
+      if (request.method === "OPTIONS") {
+        return corsPreflight(request);
+      }
       return handleGetToken(request, env);
     }
 
@@ -18,7 +21,7 @@ export default {
 async function handleGetToken(request, env) {
   const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!jwt) {
-    return new Response(JSON.stringify({ error: "Not authenticated" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    return jsonWithCors(request, { error: "Not authenticated" }, 401);
   }
 
   let email;
@@ -26,11 +29,11 @@ async function handleGetToken(request, env) {
     const payload = JSON.parse(atob(jwt.split(".")[1]));
     email = payload.email;
   } catch (e) {
-    return new Response(JSON.stringify({ error: "Invalid token" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    return jsonWithCors(request, { error: "Invalid token" }, 401);
   }
 
   if (!email) {
-    return new Response(JSON.stringify({ error: "No email in token" }), { status: 401, headers: { "Content-Type": "application/json" } });
+    return jsonWithCors(request, { error: "No email in token" }, 401);
   }
 
   const username = email.split("@")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-");
@@ -45,10 +48,10 @@ async function handleGetToken(request, env) {
     const existingTunnel = listData.result[0];
     const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + existingTunnel.id + "/token", { headers });
     const tokenData = await tokenResp.json();
-    return new Response(JSON.stringify({
-      token: tokenData.result?.token || null,
-      url: username + ".myhomegames-server.vige.it"
-    }), { headers: { "Content-Type": "application/json" } });
+    return jsonWithCors(request, {
+      token: extractRunToken(tokenData),
+      url: username + ".myhomegames-server.vige.it",
+    });
   }
 
   const secret = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
@@ -59,7 +62,11 @@ async function handleGetToken(request, env) {
   const createData = await createResp.json();
 
   if (!createData.success) {
-    return new Response(JSON.stringify({ error: "Failed to create tunnel", details: createData.errors }), { status: 500, headers: { "Content-Type": "application/json" } });
+    return jsonWithCors(
+      request,
+      { error: "Failed to create tunnel", details: createData.errors },
+      500,
+    );
   }
 
   const tunnelId = createData.result.id;
@@ -87,10 +94,63 @@ async function handleGetToken(request, env) {
   const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
   const tokenData = await tokenResp.json();
 
-  return new Response(JSON.stringify({
-    token: tokenData.result?.token || null,
-    url: username + ".myhomegames-server.vige.it"
-  }), { headers: { "Content-Type": "application/json" } });
+  return jsonWithCors(request, {
+    token: extractRunToken(tokenData),
+    url: username + ".myhomegames-server.vige.it",
+  });
+}
+
+/** Cloudflare returns run token as result string or result.token object. */
+function extractRunToken(tokenData) {
+  const result = tokenData?.result;
+  if (typeof result === "string" && result.trim()) {
+    return result.trim();
+  }
+  if (result && typeof result.token === "string" && result.token.trim()) {
+    return result.token.trim();
+  }
+  return null;
+}
+
+function corsHeaders(request) {
+  const origin = request.headers.get("Origin");
+  if (!origin || !isAllowedCorsOrigin(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Cf-Access-Jwt-Assertion",
+  };
+}
+
+function isAllowedCorsOrigin(origin) {
+  try {
+    const u = new URL(origin);
+    const host = u.hostname.toLowerCase();
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (host === "localhost" || host === "127.0.0.1") return true;
+    if (host.endsWith(".myhomegames-server.vige.it") || host === "myhomegames-server.vige.it") {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function corsPreflight(request) {
+  const headers = {
+    ...corsHeaders(request),
+    "Access-Control-Max-Age": "86400",
+  };
+  return new Response(null, { status: 204, headers });
+}
+
+function jsonWithCors(request, data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders(request) },
+  });
 }
 
 const HTML_LANDING = `<!DOCTYPE html>
