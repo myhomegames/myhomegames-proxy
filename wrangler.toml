@@ -1,6 +1,5 @@
-# Default worker: tunnel provisioning (proxy.js)
 name = "myhomegames-tunnel-manager"
-main = "proxy.js"
+main = "worker.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
@@ -9,17 +8,9 @@ workers_dev = false
 pattern = "myhomegames-server.vige.it/*"
 zone_name = "vige.it"
 
-[vars]
-MYGAMES_ACCOUNT_ID = "d2633016ba82b226e5596563e44ced6d"
-
-# Second worker in the same Wrangler project: API gateway (igdb.js)
-[env.igdb]
-name = "myhomegames-api-gateway"
-main = "igdb.js"
-compatibility_date = "2024-09-23"
-compatibility_flags = ["nodejs_compat"]
-workers_dev = false
-
-[[env.igdb.routes]]
+[[routes]]
 pattern = "*.myhomegames-server.vige.it/igdb/*"
 zone_name = "vige.it"
+
+[vars]
+MYGAMES_ACCOUNT_ID = "d2633016ba82b226e5596563e44ced6d"

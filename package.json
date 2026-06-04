@@ -2,8 +2,6 @@
   "name": "myhomegames-proxy",
   "private": true,
   "scripts": {
-    "deploy": "wrangler deploy && wrangler deploy --env igdb",
-    "deploy:proxy": "wrangler deploy",
-    "deploy:igdb": "wrangler deploy --env igdb"
+    "deploy": "wrangler deploy"
   }
 }
