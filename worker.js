@@ -1,43 +1,79 @@
+const MANAGER_HOST = "myhomegames-server.vige.it";
+const IGDB_GATEWAY_PREFIX = "/api/igdb-gateway";
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const hostname = request.headers.get("Host") || url.hostname;
+    const route = pickRoute(hostname, url.pathname, request.method);
 
-    // IGDB (solo sottodomini utente; route wrangler: *.host/igdb/*)
-    if (isIgdbPath(url.pathname) && isTunnelUserHost(hostname)) {
-      return handleIgdbRequest(request, env);
+    if (route === "igdb-gateway-relay") {
+      return handleIgdbGatewayRelay(request, env);
     }
-
-    // Landing page
-    if (url.pathname === "/" && hostname === "myhomegames-server.vige.it") {
+    if (route === "igdb-subdomain") {
+      return forwardIgdbToTunnel(request, env, hostname);
+    }
+    if (route === "landing") {
       return new Response(HTML_LANDING, { headers: { "Content-Type": "text/html" } });
     }
-
-    // API token
-    if (url.pathname === "/api/get-token") {
-      if (request.method === "OPTIONS") {
-        return corsPreflight(request);
-      }
+    if (route === "get-token-options") {
+      return corsPreflight(request);
+    }
+    if (route === "get-token") {
       return handleGetToken(request, env);
     }
 
     return new Response("Not Found", { status: 404 });
-  }
+  },
 };
 
-// ========== IGDB LOGIC ==========
-async function handleIgdbRequest(request, env) {
+function pickRoute(hostname, pathname, method) {
+  if (hostname === MANAGER_HOST && pathname.startsWith(`${IGDB_GATEWAY_PREFIX}/`)) {
+    return "igdb-gateway-relay";
+  }
+  if (isIgdbPath(pathname) && isTunnelUserHost(hostname)) {
+    return "igdb-subdomain";
+  }
+  if (pathname === "/" && hostname === MANAGER_HOST) {
+    return "landing";
+  }
+  if (pathname === "/api/get-token" && hostname === MANAGER_HOST) {
+    return method === "OPTIONS" ? "get-token-options" : "get-token";
+  }
+  return "unmatched";
+}
+
+async function handleIgdbGatewayRelay(request, env) {
+  const incoming = new URL(request.url);
+  const tunnelHost = String(request.headers.get("X-MHG-Tunnel-Host") || "").trim().toLowerCase();
+  const igdbPath = incoming.pathname.slice(IGDB_GATEWAY_PREFIX.length) || "/";
+
+  if (!isTunnelUserHost(tunnelHost)) {
+    return new Response("X-MHG-Tunnel-Host must be a user tunnel hostname", { status: 400 });
+  }
+  if (!isIgdbPath(igdbPath)) {
+    return new Response("Path must be under /igdb/", { status: 400 });
+  }
+
+  return forwardIgdbToTunnel(request, env, tunnelHost, igdbPath, incoming.search);
+}
+
+async function forwardIgdbToTunnel(request, env, tunnelHost, pathnameOverride, searchOverride) {
+  const incoming = new URL(request.url);
+  const igdbPath =
+    pathnameOverride ??
+    (isIgdbPath(incoming.pathname) ? incoming.pathname : incoming.pathname.slice(IGDB_GATEWAY_PREFIX.length) || "/");
+  const search = searchOverride ?? incoming.search;
+
   if (!env.TWITCH_CLIENT_ID || !env.TWITCH_CLIENT_SECRET) {
     return new Response("TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET secrets are missing", { status: 500 });
   }
 
-  const incoming = new URL(request.url);
-  const hostname = request.headers.get("Host") || incoming.hostname;
-  const target = new URL(incoming.pathname + incoming.search, originBase(env, hostname));
-
+  const target = new URL(igdbPath + search, originBase(env, tunnelHost));
   const headers = new Headers(request.headers);
   headers.delete("X-Twitch-Client-Id");
   headers.delete("X-Twitch-Client-Secret");
+  headers.delete("X-MHG-Tunnel-Host");
   if (env.TWITCH_CLIENT_ID) headers.set("X-Twitch-Client-Id", env.TWITCH_CLIENT_ID);
   if (env.TWITCH_CLIENT_SECRET) headers.set("X-Twitch-Client-Secret", env.TWITCH_CLIENT_SECRET);
 
@@ -67,7 +103,6 @@ function originBase(env, hostname) {
   return `http://${host}:${port}`;
 }
 
-// ========== TUNNEL MANAGER LOGIC (esistente) ==========
 async function handleGetToken(request, env) {
   const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!jwt) return jsonWithCors(request, { error: "Not authenticated" }, 401);
@@ -89,13 +124,16 @@ async function handleGetToken(request, env) {
   if (listData.result && listData.result.length > 0) {
     const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + listData.result[0].id + "/token", { headers });
     const tokenData = await tokenResp.json();
-    return jsonWithCors(request, { token: extractRunToken(tokenData), url: username + ".myhomegames-server.vige.it" });
+    return jsonWithCors(request, {
+      token: extractRunToken(tokenData),
+      url: username + ".myhomegames-server.vige.it",
+    });
   }
 
   const secret = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
   const createResp = await fetch(accountApi + "/cfd_tunnel", {
     method: "POST", headers,
-    body: JSON.stringify({ name: tunnelName, tunnel_secret: secret })
+    body: JSON.stringify({ name: tunnelName, tunnel_secret: secret }),
   });
   const createData = await createResp.json();
 
@@ -110,22 +148,30 @@ async function handleGetToken(request, env) {
       config: {
         ingress: [
           { hostname: username + ".myhomegames-server.vige.it", service: "http://localhost:4000" },
-          { service: "http_status:404" }
-        ]
-      }
-    })
+          { service: "http_status:404" },
+        ],
+      },
+    }),
   });
 
   const zoneId = "243802546c0a2d88201fe78091fa3e84";
   await fetch("https://api.cloudflare.com/client/v4/zones/" + zoneId + "/dns_records", {
     method: "POST", headers,
-    body: JSON.stringify({ type: "CNAME", name: username + ".myhomegames-server.vige.it", content: tunnelId + ".cfargotunnel.com", proxied: true })
+    body: JSON.stringify({
+      type: "CNAME",
+      name: username + ".myhomegames-server.vige.it",
+      content: tunnelId + ".cfargotunnel.com",
+      proxied: true,
+    }),
   });
 
   const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
   const tokenData = await tokenResp.json();
 
-  return jsonWithCors(request, { token: extractRunToken(tokenData), url: username + ".myhomegames-server.vige.it" });
+  return jsonWithCors(request, {
+    token: extractRunToken(tokenData),
+    url: username + ".myhomegames-server.vige.it",
+  });
 }
 
 function extractRunToken(tokenData) {
