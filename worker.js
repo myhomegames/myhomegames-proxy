@@ -14,7 +14,7 @@ export default {
       return forwardIgdbToTunnel(request, env, hostname);
     }
     if (route === "landing") {
-      return new Response(HTML_LANDING, { headers: { "Content-Type": "text/html" } });
+      return Response.redirect(new URL("/api/get-token", request.url).toString(), 302);
     }
     if (route === "get-token-options") {
       return corsPreflight(request);
@@ -103,15 +103,71 @@ function originBase(env, hostname) {
   return `http://${host}:${port}`;
 }
 
+function isAllowedReturnUrl(raw) {
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.toLowerCase();
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (host === "localhost" || host === "127.0.0.1") return true;
+    if (host.endsWith(".myhomegames-server.vige.it") || host === "myhomegames-server.vige.it") return true;
+    if (host.endsWith(".myhomegames.vige.it") || host === "myhomegames.vige.it") return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function redirectToReturnUrl(returnTo, params = {}) {
+  const dest = new URL(returnTo);
+  for (const [key, value] of Object.entries(params)) {
+    dest.searchParams.set(key, value);
+  }
+  return Response.redirect(dest.toString(), 302);
+}
+
+function encodeTunnelReturnHash(payload) {
+  const json = JSON.stringify({
+    token: payload.token,
+    url: payload.url,
+  });
+  const b64 = btoa(json).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `tunnel=${b64}`;
+}
+
+/** Browser OAuth return: pass token in URL fragment so the SPA can POST /tunnel/connect without cross-origin fetch. */
+function redirectToAppWithTunnel(returnTo, payload) {
+  const dest = new URL(returnTo);
+  dest.searchParams.set("tunnel_auth", "ok");
+  dest.hash = encodeTunnelReturnHash(payload);
+  return Response.redirect(dest.toString(), 302);
+}
+
 async function handleGetToken(request, env) {
+  const requestUrl = new URL(request.url);
+  const returnTo = requestUrl.searchParams.get("return_to")?.trim() || "";
+  const browserReturnTo = returnTo && isAllowedReturnUrl(returnTo) ? returnTo : "";
+
   const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
-  if (!jwt) return jsonWithCors(request, { error: "Not authenticated" }, 401);
+  if (!jwt) {
+    if (browserReturnTo) {
+      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "not_authenticated" });
+    }
+    return jsonWithCors(request, { error: "Not authenticated" }, 401);
+  }
 
   let email;
   try { email = JSON.parse(atob(jwt.split(".")[1])).email; } catch {
+    if (browserReturnTo) {
+      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "invalid_token" });
+    }
     return jsonWithCors(request, { error: "Invalid token" }, 401);
   }
-  if (!email) return jsonWithCors(request, { error: "No email in token" }, 401);
+  if (!email) {
+    if (browserReturnTo) {
+      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "no_email" });
+    }
+    return jsonWithCors(request, { error: "No email in token" }, 401);
+  }
 
   const username = email.split("@")[0].toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const tunnelName = "MyHomeGames-" + username;
@@ -124,10 +180,17 @@ async function handleGetToken(request, env) {
   if (listData.result && listData.result.length > 0) {
     const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + listData.result[0].id + "/token", { headers });
     const tokenData = await tokenResp.json();
-    return jsonWithCors(request, {
+    const payload = {
       token: extractRunToken(tokenData),
       url: username + ".myhomegames-server.vige.it",
-    });
+    };
+    if (browserReturnTo) {
+      if (!payload.token) {
+        return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "missing_token" });
+      }
+      return redirectToAppWithTunnel(browserReturnTo, payload);
+    }
+    return jsonWithCors(request, payload);
   }
 
   const secret = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
@@ -138,6 +201,9 @@ async function handleGetToken(request, env) {
   const createData = await createResp.json();
 
   if (!createData.success) {
+    if (browserReturnTo) {
+      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "create_tunnel_failed" });
+    }
     return jsonWithCors(request, { error: "Failed to create tunnel", details: createData.errors }, 500);
   }
 
@@ -168,10 +234,17 @@ async function handleGetToken(request, env) {
   const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
   const tokenData = await tokenResp.json();
 
-  return jsonWithCors(request, {
+  const payload = {
     token: extractRunToken(tokenData),
     url: username + ".myhomegames-server.vige.it",
-  });
+  };
+  if (browserReturnTo) {
+    if (!payload.token) {
+      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "missing_token" });
+    }
+    return redirectToAppWithTunnel(browserReturnTo, payload);
+  }
+  return jsonWithCors(request, payload);
 }
 
 function extractRunToken(tokenData) {
@@ -211,26 +284,3 @@ function jsonWithCors(request, data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...corsHeaders(request) } });
 }
 
-const HTML_LANDING = `<!DOCTYPE html>
-<html lang="it">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MyHomeGames</title>
-  <style>
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#1a1a2e;color:#fff}
-    .container{text-align:center;padding:2rem}
-    h1{font-size:2.5rem;margin-bottom:.5rem}
-    p{color:#aaa;margin-bottom:2rem}
-    .btn{display:inline-block;padding:12px 32px;background:#f97316;color:#fff;text-decoration:none;border-radius:8px;font-size:1.1rem;font-weight:600;transition:background .2s}
-    .btn:hover{background:#ea580c}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🎮 MyHomeGames</h1>
-    <p>Connetti il tuo localhost:4000 a internet</p>
-    <a href="/api/get-token" class="btn">Connetti</a>
-  </div>
-</body>
-</html>`;
