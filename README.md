@@ -41,6 +41,7 @@ npx wrangler secret put TWITCH_CLIENT_SECRET
 - Landing page at `/` on `myhomegames-server.vige.it`.
 - `GET /api/get-token` using Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`).
 - Tunnel name `MyHomeGames-<username>`; ingress + CNAME for `<username>-myhomegames-server.vige.it` → `http://localhost:4000`.
+- `<username>` is slugified from the **full email** (local + domain), e.g. `luca.stancapiano@vige.it` → `luca-stancapiano-vige-it`.
 - JSON response: `token`, `url`.
 
 ### Config
