@@ -71,7 +71,10 @@ function pickRoute(hostname, pathname, method) {
   if (pathname === "/" && hostname === MANAGER_HOST) {
     return "landing";
   }
-  if (pathname === "/api/get-token" && hostname === MANAGER_HOST) {
+  if (
+    hostname === MANAGER_HOST &&
+    (pathname === "/api/get-token" || pathname.startsWith("/api/get-token/r/"))
+  ) {
     return method === "OPTIONS" ? "get-token-options" : "get-token";
   }
   return "unmatched";
@@ -164,18 +167,77 @@ function encodeTunnelReturnHash(payload) {
   return `tunnel=${b64}`;
 }
 
+function readReturnToCookie(request) {
+  const cookie = request.headers.get("Cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)mhg_return_to=([^;]*)/);
+  if (!match) return "";
+  try {
+    return decodeURIComponent(match[1]).trim();
+  } catch {
+    return "";
+  }
+}
+
+function appendReturnToCookie(headers, returnTo) {
+  headers.append(
+    "Set-Cookie",
+    `mhg_return_to=${encodeURIComponent(returnTo)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`,
+  );
+}
+
 /** Browser OAuth return: pass token in URL fragment so the SPA can POST /tunnel/connect without cross-origin fetch. */
 function redirectToAppWithTunnel(returnTo, payload) {
   const dest = new URL(returnTo);
   dest.searchParams.set("tunnel_auth", "ok");
   dest.hash = encodeTunnelReturnHash(payload);
-  return Response.redirect(dest.toString(), 302);
+  const headers = new Headers({ Location: dest.toString() });
+  appendReturnToCookie(headers, returnTo);
+  return new Response(null, { status: 302, headers });
+}
+
+function decodeBase64Url(value) {
+  const padded = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padLen = (4 - (padded.length % 4)) % 4;
+  return atob(padded + "=".repeat(padLen));
+}
+
+/** return_to from path (/api/get-token/r/<b64url>) survives Access logout redirects. */
+function parseGetTokenReturnTo(requestUrl) {
+  const prefix = "/api/get-token/r/";
+  const pathname = requestUrl.pathname;
+  if (pathname.startsWith(prefix) && pathname.length > prefix.length) {
+    try {
+      const decoded = decodeBase64Url(pathname.slice(prefix.length)).trim();
+      if (decoded) return decoded;
+    } catch {
+      // fall through
+    }
+  }
+  return requestUrl.searchParams.get("return_to")?.trim() || "";
 }
 
 async function handleGetToken(request, env) {
   const requestUrl = new URL(request.url);
-  const returnTo = requestUrl.searchParams.get("return_to")?.trim() || "";
-  const browserReturnTo = returnTo && isAllowedReturnUrl(returnTo) ? returnTo : "";
+
+  if (requestUrl.searchParams.has("__cf_access_message")) {
+    const cleaned = new URL(requestUrl);
+    cleaned.searchParams.delete("__cf_access_message");
+    const headers = new Headers({ Location: cleaned.toString() });
+    const cleanedReturnTo = parseGetTokenReturnTo(cleaned);
+    if (cleanedReturnTo && isAllowedReturnUrl(cleanedReturnTo)) {
+      appendReturnToCookie(headers, cleanedReturnTo);
+    }
+    return new Response(null, { status: 302, headers });
+  }
+
+  const returnTo = parseGetTokenReturnTo(requestUrl);
+  let browserReturnTo = returnTo && isAllowedReturnUrl(returnTo) ? returnTo : "";
+  if (!browserReturnTo) {
+    const fromCookie = readReturnToCookie(request);
+    if (fromCookie && isAllowedReturnUrl(fromCookie)) {
+      browserReturnTo = fromCookie;
+    }
+  }
 
   const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!jwt) {
@@ -183,6 +245,13 @@ async function handleGetToken(request, env) {
       return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "not_authenticated" });
     }
     return jsonWithCors(request, { error: "Not authenticated" }, 401);
+  }
+
+  if (!browserReturnTo) {
+    const fallback = String(env.DEFAULT_APP_RETURN_URL || "").trim();
+    if (fallback && isAllowedReturnUrl(fallback)) {
+      browserReturnTo = fallback;
+    }
   }
 
   let email;
