@@ -1,5 +1,17 @@
 const MANAGER_HOST = "myhomegames-server.vige.it";
+const USER_TUNNEL_HOST_SUFFIX = "-myhomegames-server.vige.it";
+const ZONE_ID = "243802546c0a2d88201fe78091fa3e84";
 const IGDB_GATEWAY_PREFIX = "/api/igdb-gateway";
+
+function userTunnelHostname(username) {
+  return `${username}${USER_TUNNEL_HOST_SUFFIX}`;
+}
+
+function isTunnelUserHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  if (host === MANAGER_HOST) return false;
+  return host.endsWith(USER_TUNNEL_HOST_SUFFIX);
+}
 
 export default {
   async fetch(request, env) {
@@ -85,11 +97,6 @@ async function forwardIgdbToTunnel(request, env, tunnelHost, pathnameOverride, s
   }));
 }
 
-function isTunnelUserHost(hostname) {
-  const host = String(hostname || "").toLowerCase();
-  return host.endsWith(".myhomegames-server.vige.it") && host !== "myhomegames-server.vige.it";
-}
-
 function isIgdbPath(pathname) {
   return pathname === "/igdb" || pathname.startsWith("/igdb/");
 }
@@ -109,7 +116,8 @@ function isAllowedReturnUrl(raw) {
     const host = u.hostname.toLowerCase();
     if (u.protocol !== "http:" && u.protocol !== "https:") return false;
     if (host === "localhost" || host === "127.0.0.1") return true;
-    if (host.endsWith(".myhomegames-server.vige.it") || host === "myhomegames-server.vige.it") return true;
+    if (host.endsWith(USER_TUNNEL_HOST_SUFFIX)) return true;
+    if (host === MANAGER_HOST) return true;
     if (host.endsWith(".myhomegames.vige.it") || host === "myhomegames.vige.it") return true;
   } catch {
     return false;
@@ -178,11 +186,13 @@ async function handleGetToken(request, env) {
   const listData = await listResp.json();
 
   if (listData.result && listData.result.length > 0) {
-    const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + listData.result[0].id + "/token", { headers });
+    const tunnelId = listData.result[0].id;
+    await ensureUserTunnelRouting(accountApi, tunnelId, username, headers);
+    const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
     const tokenData = await tokenResp.json();
     const payload = {
       token: extractRunToken(tokenData),
-      url: username + ".myhomegames-server.vige.it",
+      url: userTunnelHostname(username),
     };
     if (browserReturnTo) {
       if (!payload.token) {
@@ -208,35 +218,14 @@ async function handleGetToken(request, env) {
   }
 
   const tunnelId = createData.result.id;
-  await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/configurations", {
-    method: "PUT", headers,
-    body: JSON.stringify({
-      config: {
-        ingress: [
-          { hostname: username + ".myhomegames-server.vige.it", service: "http://localhost:4000" },
-          { service: "http_status:404" },
-        ],
-      },
-    }),
-  });
-
-  const zoneId = "243802546c0a2d88201fe78091fa3e84";
-  await fetch("https://api.cloudflare.com/client/v4/zones/" + zoneId + "/dns_records", {
-    method: "POST", headers,
-    body: JSON.stringify({
-      type: "CNAME",
-      name: username + ".myhomegames-server.vige.it",
-      content: tunnelId + ".cfargotunnel.com",
-      proxied: true,
-    }),
-  });
+  await ensureUserTunnelRouting(accountApi, tunnelId, username, headers);
 
   const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
   const tokenData = await tokenResp.json();
 
   const payload = {
     token: extractRunToken(tokenData),
-    url: username + ".myhomegames-server.vige.it",
+    url: userTunnelHostname(username),
   };
   if (browserReturnTo) {
     if (!payload.token) {
@@ -245,6 +234,46 @@ async function handleGetToken(request, env) {
     return redirectToAppWithTunnel(browserReturnTo, payload);
   }
   return jsonWithCors(request, payload);
+}
+
+async function ensureUserTunnelRouting(accountApi, tunnelId, username, headers) {
+  const hostname = userTunnelHostname(username);
+  await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/configurations", {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      config: {
+        ingress: [
+          { hostname, service: "http://localhost:4000" },
+          { service: "http_status:404" },
+        ],
+      },
+    }),
+  });
+  await ensureDnsCname(ZONE_ID, headers, hostname, tunnelId + ".cfargotunnel.com");
+}
+
+async function ensureDnsCname(zoneId, headers, name, content) {
+  const listResp = await fetch(
+    "https://api.cloudflare.com/client/v4/zones/" + zoneId + "/dns_records?type=CNAME&name=" + encodeURIComponent(name),
+    { headers },
+  );
+  const listData = await listResp.json();
+  const existing = listData?.result?.find((r) => r.name === name || r.name === name + ".");
+  if (existing) {
+    if (existing.content === content) return;
+    await fetch("https://api.cloudflare.com/client/v4/zones/" + zoneId + "/dns_records/" + existing.id, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ content, proxied: true }),
+    });
+    return;
+  }
+  await fetch("https://api.cloudflare.com/client/v4/zones/" + zoneId + "/dns_records", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ type: "CNAME", name, content, proxied: true }),
+  });
 }
 
 function extractRunToken(tokenData) {
@@ -271,7 +300,8 @@ function isAllowedCorsOrigin(origin) {
     const host = u.hostname.toLowerCase();
     if (u.protocol !== "http:" && u.protocol !== "https:") return false;
     if (host === "localhost" || host === "127.0.0.1") return true;
-    if (host.endsWith(".myhomegames-server.vige.it") || host === "myhomegames-server.vige.it") return true;
+    if (host.endsWith(USER_TUNNEL_HOST_SUFFIX)) return true;
+    if (host === MANAGER_HOST) return true;
   } catch { return false; }
   return false;
 }

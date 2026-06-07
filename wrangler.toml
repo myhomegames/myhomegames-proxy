@@ -9,7 +9,7 @@ pattern = "myhomegames-server.vige.it/*"
 zone_name = "vige.it"
 
 [[routes]]
-pattern = "*.myhomegames-server.vige.it/igdb/*"
+pattern = "*-myhomegames-server.vige.it/igdb/*"
 zone_name = "vige.it"
 
 [vars]
