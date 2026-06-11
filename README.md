@@ -62,7 +62,7 @@ MYGAMES_ACCOUNT_ID = "d2633016ba82b226e5596563e44ced6d"
 2. **Injects** app credentials from Worker secrets (`TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`).
 3. **Forwards** via `fetch()` to `https://<user>-myhomegames-server.vige.it/...` → tunnel → `localhost:4000`.
 
-Other API paths on the same host (e.g. `/library`, `/auth/twitch`) bypass the worker and reach Node directly through the tunnel.
+Other API paths on the same host (e.g. `/library`, `/collections`) bypass the worker and reach Node directly through the tunnel.
 
 ### Errors
 
@@ -83,7 +83,7 @@ Other API paths on the same host (e.g. `/library`, `/auth/twitch`) bypass the wo
 [App] → worker @ luca-myhomegames-server.vige.it/igdb/*
         → inject Twitch headers → tunnel → Node
 
-[App] → luca-myhomegames-server.vige.it/library, /auth/twitch, …
+[App] → luca-myhomegames-server.vige.it/library, /collections, …
         → tunnel → Node (no worker)
 ```
 
