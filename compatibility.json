@@ -1,6 +1,6 @@
 {
   "role": "proxy",
   "requires": {
-    "minServerVersion": "1.1.2"
+    "minServerVersion": "1.1.0"
   }
 }
