@@ -15,6 +15,7 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 | `myhomegames-server.vige.it/*` | Landing + `/api/get-token` |
 | `*-myhomegames-server.vige.it/igdb/*` | Inject Twitch headers, forward to Node |
 | Other paths on `<user>-myhomegames-server.vige.it` | Direct to tunnel → Node (no worker) |
+| `<user>-moonlight-web.vige.it` | Direct to tunnel → Moonlight Web `:8080` (no worker) |
 
 Deploy:
 
@@ -40,9 +41,11 @@ npx wrangler secret put TWITCH_CLIENT_SECRET
 
 - Landing page at `/` on `myhomegames-server.vige.it`.
 - `GET /api/get-token` using Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`).
-- Tunnel name `MyHomeGames-<username>`; ingress + CNAME for `<username>-myhomegames-server.vige.it` → `http://localhost:4000`.
+- Tunnel name `MyHomeGames-<username>`; ingress + CNAME:
+  - `<username>-myhomegames-server.vige.it` → `http://localhost:4000` (API)
+  - `<username>-moonlight-web.vige.it` → `http://localhost:8080` (Moonlight Web UI for browser remote play)
 - `<username>` is slugified from the **full email** (local + domain), e.g. `luca.stancapiano@vige.it` → `luca-stancapiano-vige-it`.
-- JSON response: `token`, `url`.
+- JSON response: `token`, `url` (API hostname; Moonlight URL is derived by the server as `https://<username>-moonlight-web.vige.it`).
 
 ### Config
 
@@ -87,7 +90,7 @@ Other API paths on the same host (e.g. `/library`, `/collections`) bypass the wo
         → tunnel → Node (no worker)
 ```
 
-**Cloudflare Access**: apply a policy for `*-myhomegames-server.vige.it` as well (in addition to `myhomegames-server.vige.it`).
+**Cloudflare Access**: apply a policy for `*-myhomegames-server.vige.it` as well (in addition to `myhomegames-server.vige.it`). For browser remote play, either include `*-moonlight-web.vige.it` in Access or leave it without Access if the iframe must load without an extra login (hostname is still per-user).
 
 One worker, one deploy: `npx wrangler deploy`.
 

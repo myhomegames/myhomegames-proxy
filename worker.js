@@ -1,10 +1,17 @@
 const MANAGER_HOST = "myhomegames-server.vige.it";
 const USER_TUNNEL_HOST_SUFFIX = "-myhomegames-server.vige.it";
+const USER_MOONLIGHT_HOST_SUFFIX = "-moonlight-web.vige.it";
 const ZONE_ID = "243802546c0a2d88201fe78091fa3e84";
 const IGDB_GATEWAY_PREFIX = "/api/igdb-gateway";
+/** Host port where Moonlight Web listens (server MOONLIGHT_WEB_PORT default). */
+const MOONLIGHT_WEB_LOCAL_PORT = 8080;
 
 function userTunnelHostname(username) {
   return `${username}${USER_TUNNEL_HOST_SUFFIX}`;
+}
+
+function userMoonlightWebHostname(username) {
+  return `${username}${USER_MOONLIGHT_HOST_SUFFIX}`;
 }
 
 function slugEmailPart(part) {
@@ -329,6 +336,7 @@ async function handleGetToken(request, env) {
 
 async function ensureUserTunnelRouting(accountApi, tunnelId, username, headers) {
   const hostname = userTunnelHostname(username);
+  const moonlightHostname = userMoonlightWebHostname(username);
   await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/configurations", {
     method: "PUT",
     headers,
@@ -336,12 +344,15 @@ async function ensureUserTunnelRouting(accountApi, tunnelId, username, headers) 
       config: {
         ingress: [
           { hostname, service: "http://localhost:4000" },
+          { hostname: moonlightHostname, service: `http://localhost:${MOONLIGHT_WEB_LOCAL_PORT}` },
           { service: "http_status:404" },
         ],
       },
     }),
   });
-  await ensureDnsCname(ZONE_ID, headers, hostname, tunnelId + ".cfargotunnel.com");
+  const tunnelTarget = tunnelId + ".cfargotunnel.com";
+  await ensureDnsCname(ZONE_ID, headers, hostname, tunnelTarget);
+  await ensureDnsCname(ZONE_ID, headers, moonlightHostname, tunnelTarget);
 }
 
 async function ensureDnsCname(zoneId, headers, name, content) {
