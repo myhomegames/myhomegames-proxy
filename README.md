@@ -12,7 +12,7 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 
 | Route | Handler |
 |-------|---------|
-| `myhomegames-server.vige.it/*` | Landing + `/api/get-token` |
+| `myhomegames-server.vige.it/*` | Landing + `/api/get-token` + `/api/turn-ice-servers` |
 | `*-myhomegames-server.vige.it/igdb/*` | Inject Twitch headers, forward to Node |
 | Other paths on `<user>-myhomegames-server.vige.it` | Direct to tunnel → Node (no worker) |
 | `<user>-moonlight-web.vige.it` | Direct to tunnel → Moonlight Web `:8080` (no worker) |
@@ -33,8 +33,12 @@ npx wrangler login
 npx wrangler secret put MYGAMES_CF_API_TOKEN
 npx wrangler secret put TWITCH_CLIENT_ID
 npx wrangler secret put TWITCH_CLIENT_SECRET
+# Realtime TURN (browser remote play) — create key in Dashboard → Realtime → TURN
+npx wrangler secret put CLOUDFLARE_TURN_KEY_ID
+npx wrangler secret put CLOUDFLARE_TURN_API_TOKEN
 ```
 
+Do **not** put TURN key/token in `myhomegames-server` `.env` or release packages. Home servers call `POST /api/turn-ice-servers` on this Worker; only short-lived ICE credentials leave Cloudflare.
 ---
 
 ## Tunnel manager (primary domain)
@@ -46,6 +50,7 @@ npx wrangler secret put TWITCH_CLIENT_SECRET
   - `<username>-moonlight-web.vige.it` → `http://localhost:8080` (Moonlight Web UI for browser remote play)
 - `<username>` is slugified from the **full email** (local + domain), e.g. `luca.stancapiano@vige.it` → `luca-stancapiano-vige-it`.
 - JSON response: `token`, `url` (API hostname; Moonlight URL is derived by the server as `https://<username>-moonlight-web.vige.it`).
+- `POST /api/turn-ice-servers` — mints short-lived Cloudflare Realtime TURN ICE servers for Moonlight Web (Worker secrets; used by home `myhomegames-server`). In Cloudflare Access, add a **Bypass** policy for this path so the home server can call it without a browser JWT.
 
 ### Config
 
