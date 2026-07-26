@@ -803,11 +803,37 @@ function handleLinkPage(request) {
     <p>Enter the code shown on the Smart TV, then sign in with Cloudflare Access.</p>
     <form method="GET" action="${approveUrl}">
       <label for="user_code">TV code</label>
-      <input id="user_code" name="user_code" maxlength="9" autocomplete="one-time-code"
-        value="${escapeHtml(prefill)}" placeholder="ABCD-EFGH" required />
+      <input id="user_code" name="user_code" maxlength="9" inputmode="text" autocomplete="one-time-code"
+        spellcheck="false" value="${escapeHtml(prefill)}" placeholder="ABCD-EFGH" required />
       <button type="submit">Continue with Cloudflare</button>
     </form>
   </main>
+  <script>
+    (function () {
+      var input = document.getElementById("user_code");
+      if (!input) return;
+      function formatCode(raw) {
+        var clean = String(raw || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+        if (clean.length <= 4) return clean;
+        return clean.slice(0, 4) + "-" + clean.slice(4);
+      }
+      function applyFormat() {
+        var start = input.selectionStart;
+        var before = input.value;
+        var next = formatCode(before);
+        if (next === before) return;
+        input.value = next;
+        // Keep caret after the typed char; jump past auto-inserted hyphen.
+        var pos = typeof start === "number" ? start : next.length;
+        if (before.length < next.length && next.charAt(pos - 1) === "-") pos += 1;
+        if (next.length >= 5 && before.length <= 4 && pos === 4) pos = 5;
+        try { input.setSelectionRange(pos, pos); } catch (e) {}
+      }
+      input.addEventListener("input", applyFormat);
+      input.addEventListener("blur", applyFormat);
+      applyFormat();
+    })();
+  </script>
 </body>
 </html>`;
   return new Response(html, {
