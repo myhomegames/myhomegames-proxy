@@ -6,6 +6,10 @@ const IGDB_GATEWAY_PREFIX = "/api/igdb-gateway";
 /** Host port where Moonlight Web listens (server MOONLIGHT_WEB_PORT default). */
 const MOONLIGHT_WEB_LOCAL_PORT = 8080;
 
+const DEVICE_CODE_TTL_SECONDS = 600;
+const DEVICE_POLL_INTERVAL_SECONDS = 5;
+const USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
 function userTunnelHostname(username) {
   return `${username}${USER_TUNNEL_HOST_SUFFIX}`;
 }
@@ -69,6 +73,24 @@ export default {
     if (route === "turn-ice-servers") {
       return handleTurnIceServers(request, env);
     }
+    if (route === "device-code-options") {
+      return corsPreflight(request, { methods: "POST, OPTIONS" });
+    }
+    if (route === "device-code") {
+      return handleDeviceCode(request, env);
+    }
+    if (route === "device-poll-options") {
+      return corsPreflight(request, { methods: "GET, OPTIONS" });
+    }
+    if (route === "device-poll") {
+      return handleDevicePoll(request, env);
+    }
+    if (route === "device-approve") {
+      return handleDeviceApprove(request, env);
+    }
+    if (route === "link") {
+      return handleLinkPage(request);
+    }
 
     return new Response("Not Found", { status: 404 });
   },
@@ -92,6 +114,18 @@ function pickRoute(hostname, pathname, method) {
   }
   if (hostname === MANAGER_HOST && pathname === "/api/turn-ice-servers") {
     return method === "OPTIONS" ? "turn-ice-servers-options" : "turn-ice-servers";
+  }
+  if (hostname === MANAGER_HOST && pathname === "/api/device/code") {
+    return method === "OPTIONS" ? "device-code-options" : "device-code";
+  }
+  if (hostname === MANAGER_HOST && pathname === "/api/device/poll") {
+    return method === "OPTIONS" ? "device-poll-options" : "device-poll";
+  }
+  if (hostname === MANAGER_HOST && pathname === "/api/device/approve") {
+    return "device-approve";
+  }
+  if (hostname === MANAGER_HOST && (pathname === "/link" || pathname === "/link/")) {
+    return "link";
   }
   return "unmatched";
 }
@@ -345,6 +379,68 @@ function parseGetTokenReturnTo(requestUrl) {
   return requestUrl.searchParams.get("return_to")?.trim() || "";
 }
 
+function emailFromAccessJwt(request) {
+  const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
+  if (!jwt) return { error: "not_authenticated" };
+  let email;
+  try {
+    email = JSON.parse(atob(jwt.split(".")[1])).email;
+  } catch {
+    return { error: "invalid_token" };
+  }
+  if (!email) return { error: "no_email" };
+  return { email: String(email) };
+}
+
+/**
+ * Create or fetch the Cloudflare Tunnel for this Access identity.
+ * Shared by browser get-token and TV device-code approve.
+ */
+async function mintTunnelForEmail(env, email) {
+  const username = usernameFromEmail(email);
+  const tunnelName = "MyHomeGames-" + username;
+  const accountApi = "https://api.cloudflare.com/client/v4/accounts/" + env.MYGAMES_ACCOUNT_ID;
+  const headers = { Authorization: "Bearer " + env.MYGAMES_CF_API_TOKEN, "Content-Type": "application/json" };
+
+  const listResp = await fetch(accountApi + "/cfd_tunnel?name=" + tunnelName, { headers });
+  const listData = await listResp.json();
+
+  if (listData.result && listData.result.length > 0) {
+    const tunnelId = listData.result[0].id;
+    await ensureUserTunnelRouting(accountApi, tunnelId, username, headers);
+    const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
+    const tokenData = await tokenResp.json();
+    const token = extractRunToken(tokenData);
+    if (!token) {
+      return { error: "missing_token" };
+    }
+    return { token, url: userTunnelHostname(username) };
+  }
+
+  const secret = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+  const createResp = await fetch(accountApi + "/cfd_tunnel", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: tunnelName, tunnel_secret: secret }),
+  });
+  const createData = await createResp.json();
+
+  if (!createData.success) {
+    return { error: "create_tunnel_failed", details: createData.errors };
+  }
+
+  const tunnelId = createData.result.id;
+  await ensureUserTunnelRouting(accountApi, tunnelId, username, headers);
+
+  const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
+  const tokenData = await tokenResp.json();
+  const token = extractRunToken(tokenData);
+  if (!token) {
+    return { error: "missing_token" };
+  }
+  return { token, url: userTunnelHostname(username) };
+}
+
 async function handleGetToken(request, env) {
   const requestUrl = new URL(request.url);
 
@@ -368,10 +464,10 @@ async function handleGetToken(request, env) {
     }
   }
 
-  const jwt = request.headers.get("Cf-Access-Jwt-Assertion");
-  if (!jwt) {
+  const identity = emailFromAccessJwt(request);
+  if (identity.error) {
     if (browserReturnTo) {
-      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "not_authenticated" });
+      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: identity.error });
     }
     return jsonWithCors(request, { error: "Not authenticated" }, 401);
   }
@@ -383,77 +479,386 @@ async function handleGetToken(request, env) {
     }
   }
 
-  let email;
-  try { email = JSON.parse(atob(jwt.split(".")[1])).email; } catch {
+  const minted = await mintTunnelForEmail(env, identity.email);
+  if (minted.error) {
     if (browserReturnTo) {
-      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "invalid_token" });
+      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: minted.error });
     }
-    return jsonWithCors(request, { error: "Invalid token" }, 401);
-  }
-  if (!email) {
-    if (browserReturnTo) {
-      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "no_email" });
-    }
-    return jsonWithCors(request, { error: "No email in token" }, 401);
-  }
-
-  const username = usernameFromEmail(email);
-  const tunnelName = "MyHomeGames-" + username;
-  const accountApi = "https://api.cloudflare.com/client/v4/accounts/" + env.MYGAMES_ACCOUNT_ID;
-  const headers = { Authorization: "Bearer " + env.MYGAMES_CF_API_TOKEN, "Content-Type": "application/json" };
-
-  const listResp = await fetch(accountApi + "/cfd_tunnel?name=" + tunnelName, { headers });
-  const listData = await listResp.json();
-
-  if (listData.result && listData.result.length > 0) {
-    const tunnelId = listData.result[0].id;
-    await ensureUserTunnelRouting(accountApi, tunnelId, username, headers);
-    const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
-    const tokenData = await tokenResp.json();
-    const payload = {
-      token: extractRunToken(tokenData),
-      url: userTunnelHostname(username),
-    };
-    if (browserReturnTo) {
-      if (!payload.token) {
-        return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "missing_token" });
-      }
-      return redirectToAppWithTunnel(browserReturnTo, payload);
-    }
-    return jsonWithCors(request, payload);
+    const status = minted.error === "create_tunnel_failed" ? 500 : 502;
+    return jsonWithCors(
+      request,
+      { error: minted.error === "create_tunnel_failed" ? "Failed to create tunnel" : "Missing tunnel token", details: minted.details },
+      status,
+    );
   }
 
-  const secret = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
-  const createResp = await fetch(accountApi + "/cfd_tunnel", {
-    method: "POST", headers,
-    body: JSON.stringify({ name: tunnelName, tunnel_secret: secret }),
-  });
-  const createData = await createResp.json();
-
-  if (!createData.success) {
-    if (browserReturnTo) {
-      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "create_tunnel_failed" });
-    }
-    return jsonWithCors(request, { error: "Failed to create tunnel", details: createData.errors }, 500);
-  }
-
-  const tunnelId = createData.result.id;
-  await ensureUserTunnelRouting(accountApi, tunnelId, username, headers);
-
-  const tokenResp = await fetch(accountApi + "/cfd_tunnel/" + tunnelId + "/token", { headers });
-  const tokenData = await tokenResp.json();
-
-  const payload = {
-    token: extractRunToken(tokenData),
-    url: userTunnelHostname(username),
-  };
+  const payload = { token: minted.token, url: minted.url };
   if (browserReturnTo) {
-    if (!payload.token) {
-      return redirectToReturnUrl(browserReturnTo, { tunnel_auth: "error", reason: "missing_token" });
-    }
     return redirectToAppWithTunnel(browserReturnTo, payload);
   }
   return jsonWithCors(request, payload);
+}
+
+/* ---------- Device-code pairing (Smart TV) ---------- */
+
+function pairingKv(env) {
+  return env.DEVICE_PAIRING || null;
+}
+
+function deviceKey(deviceCode) {
+  return `device:${deviceCode}`;
+}
+
+function userKey(userCode) {
+  return `user:${normalizeUserCode(userCode)}`;
+}
+
+function normalizeUserCode(raw) {
+  return String(raw || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
+function formatUserCode(normalized) {
+  const clean = normalizeUserCode(normalized);
+  if (clean.length !== 8) return clean;
+  return `${clean.slice(0, 4)}-${clean.slice(4)}`;
+}
+
+function randomUserCode() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (let i = 0; i < 8; i++) {
+    out += USER_CODE_ALPHABET[bytes[i] % USER_CODE_ALPHABET.length];
+  }
+  return formatUserCode(out);
+}
+
+function randomDeviceCode() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function putPairingSession(kv, session) {
+  const ttl = Math.max(60, Math.floor((session.expires_at - Date.now()) / 1000));
+  const body = JSON.stringify(session);
+  await kv.put(deviceKey(session.device_code), body, { expirationTtl: ttl });
+  await kv.put(userKey(session.user_code), session.device_code, { expirationTtl: ttl });
+}
+
+async function readPairingByDevice(kv, deviceCode) {
+  const raw = await kv.get(deviceKey(deviceCode));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function readPairingByUserCode(kv, userCode) {
+  const deviceCode = await kv.get(userKey(userCode));
+  if (!deviceCode) return null;
+  return readPairingByDevice(kv, deviceCode);
+}
+
+async function deletePairingSession(kv, session) {
+  await Promise.all([
+    kv.delete(deviceKey(session.device_code)),
+    kv.delete(userKey(session.user_code)),
+  ]);
+}
+
+async function handleDeviceCode(request, env) {
+  if (request.method !== "POST") {
+    return jsonWithCors(request, { error: "Method not allowed" }, 405, { methods: "POST, OPTIONS" });
+  }
+
+  const kv = pairingKv(env);
+  if (!kv) {
+    return jsonWithCors(
+      request,
+      {
+        error: "Device pairing is not configured",
+        detail: "Bind a KV namespace as DEVICE_PAIRING on the tunnel manager Worker.",
+      },
+      503,
+      { methods: "POST, OPTIONS" },
+    );
+  }
+
+  let userCode = randomUserCode();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const existing = await kv.get(userKey(userCode));
+    if (!existing) break;
+    userCode = randomUserCode();
+  }
+
+  const deviceCode = randomDeviceCode();
+  const expiresAt = Date.now() + DEVICE_CODE_TTL_SECONDS * 1000;
+  const verificationUri = `https://${MANAGER_HOST}/link`;
+  const verificationUriComplete = `${verificationUri}?code=${encodeURIComponent(normalizeUserCode(userCode))}`;
+
+  const session = {
+    device_code: deviceCode,
+    user_code: normalizeUserCode(userCode),
+    status: "pending",
+    expires_at: expiresAt,
+    created_at: Date.now(),
+  };
+  await putPairingSession(kv, session);
+
+  return jsonWithCors(
+    request,
+    {
+      device_code: deviceCode,
+      user_code: formatUserCode(userCode),
+      verification_uri: verificationUri,
+      verification_uri_complete: verificationUriComplete,
+      expires_in: DEVICE_CODE_TTL_SECONDS,
+      interval: DEVICE_POLL_INTERVAL_SECONDS,
+    },
+    200,
+    { methods: "POST, OPTIONS" },
+  );
+}
+
+async function handleDevicePoll(request, env) {
+  if (request.method !== "GET") {
+    return jsonWithCors(request, { error: "Method not allowed" }, 405, { methods: "GET, OPTIONS" });
+  }
+
+  const kv = pairingKv(env);
+  if (!kv) {
+    return jsonWithCors(
+      request,
+      { error: "Device pairing is not configured" },
+      503,
+      { methods: "GET, OPTIONS" },
+    );
+  }
+
+  const deviceCode = new URL(request.url).searchParams.get("device_code")?.trim() || "";
+  if (!deviceCode || deviceCode.length < 16) {
+    return jsonWithCors(request, { error: "invalid_device_code" }, 400, { methods: "GET, OPTIONS" });
+  }
+
+  const session = await readPairingByDevice(kv, deviceCode);
+  if (!session) {
+    return jsonWithCors(request, { status: "expired" }, 200, { methods: "GET, OPTIONS" });
+  }
+  if (session.expires_at && Date.now() > session.expires_at) {
+    await deletePairingSession(kv, session);
+    return jsonWithCors(request, { status: "expired" }, 200, { methods: "GET, OPTIONS" });
+  }
+  if (session.status === "pending") {
+    return jsonWithCors(request, { status: "authorization_pending" }, 200, { methods: "GET, OPTIONS" });
+  }
+  if (session.status === "ok" && session.token && session.url) {
+    const payload = { status: "ok", token: session.token, url: session.url };
+    await deletePairingSession(kv, session);
+    return jsonWithCors(request, payload, 200, { methods: "GET, OPTIONS" });
+  }
+
+  return jsonWithCors(request, { status: "expired" }, 200, { methods: "GET, OPTIONS" });
+}
+
+async function handleDeviceApprove(request, env) {
+  if (request.method !== "GET" && request.method !== "POST") {
+    return htmlPage("Method not allowed", "<p>Use GET or POST.</p>", 405);
+  }
+
+  const kv = pairingKv(env);
+  if (!kv) {
+    return htmlPage(
+      "Pairing unavailable",
+      "<p>Device pairing KV is not configured on the tunnel manager.</p>",
+      503,
+    );
+  }
+
+  const identity = emailFromAccessJwt(request);
+  if (identity.error) {
+    return htmlPage(
+      "Sign in required",
+      "<p>Cloudflare Access authentication is required to link a TV.</p>",
+      401,
+    );
+  }
+
+  let userCode = "";
+  if (request.method === "POST") {
+    const contentType = request.headers.get("Content-Type") || "";
+    if (contentType.includes("application/json")) {
+      try {
+        const body = await request.json();
+        userCode = String(body?.user_code || "");
+      } catch {
+        userCode = "";
+      }
+    } else {
+      const form = await request.formData();
+      userCode = String(form.get("user_code") || "");
+    }
+  } else {
+    userCode = new URL(request.url).searchParams.get("user_code") || "";
+  }
+
+  const normalized = normalizeUserCode(userCode);
+  if (normalized.length !== 8) {
+    return htmlPage(
+      "Invalid code",
+      `<p>Enter the 8-character code shown on the TV.</p><p><a href="/link">Try again</a></p>`,
+      400,
+    );
+  }
+
+  const session = await readPairingByUserCode(kv, normalized);
+  if (!session || (session.expires_at && Date.now() > session.expires_at)) {
+    if (session) await deletePairingSession(kv, session);
+    return htmlPage(
+      "Code expired",
+      `<p>That code is invalid or expired. Start again from the TV.</p><p><a href="/link">Try again</a></p>`,
+      410,
+    );
+  }
+  if (session.status === "ok") {
+    return htmlPage(
+      "Already linked",
+      "<p>This code was already approved. Check the TV — it should connect shortly.</p>",
+      200,
+    );
+  }
+
+  const minted = await mintTunnelForEmail(env, identity.email);
+  if (minted.error) {
+    return htmlPage(
+      "Tunnel error",
+      `<p>Could not prepare your tunnel (${minted.error}).</p><p><a href="/link">Try again</a></p>`,
+      502,
+    );
+  }
+
+  const updated = {
+    ...session,
+    status: "ok",
+    token: minted.token,
+    url: minted.url,
+    approved_email: identity.email,
+    approved_at: Date.now(),
+  };
+  await putPairingSession(kv, updated);
+
+  return htmlPage(
+    "TV linked",
+    `<p>Signed in as <strong>${escapeHtml(identity.email)}</strong>.</p>
+     <p>Return to the TV — MyHomeGames should connect automatically.</p>`,
+    200,
+  );
+}
+
+function handleLinkPage(request) {
+  const url = new URL(request.url);
+  const prefill = formatUserCode(url.searchParams.get("code") || "");
+  const approveUrl = "/api/device/approve";
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Link TV — MyHomeGames</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      background: #0b0b0c; color: #f2f2f2;
+    }
+    main {
+      width: min(420px, 92vw); padding: 2rem;
+      border: 1px solid rgba(255,255,255,.12); border-radius: 16px;
+      background: rgba(255,255,255,.04);
+    }
+    h1 { margin: 0 0 .5rem; font-size: 1.5rem; }
+    p { margin: 0 0 1.25rem; color: rgba(255,255,255,.7); line-height: 1.45; }
+    label { display: block; font-size: .85rem; margin-bottom: .4rem; color: rgba(255,255,255,.8); }
+    input {
+      width: 100%; box-sizing: border-box; font-size: 1.5rem; letter-spacing: .2em;
+      text-align: center; text-transform: uppercase; padding: .75rem;
+      border-radius: 10px; border: 1px solid rgba(255,255,255,.2);
+      background: #111; color: #fff; margin-bottom: 1rem;
+    }
+    button {
+      width: 100%; padding: .85rem 1rem; border: 0; border-radius: 10px;
+      background: #e5a00d; color: #111; font-weight: 700; font-size: 1rem; cursor: pointer;
+    }
+    button:hover { filter: brightness(1.05); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Link your TV</h1>
+    <p>Enter the code shown on the Smart TV, then sign in with Cloudflare Access.</p>
+    <form method="GET" action="${approveUrl}">
+      <label for="user_code">TV code</label>
+      <input id="user_code" name="user_code" maxlength="9" autocomplete="one-time-code"
+        value="${escapeHtml(prefill)}" placeholder="ABCD-EFGH" required />
+      <button type="submit">Continue with Cloudflare</button>
+    </form>
+  </main>
+</body>
+</html>`;
+  return new Response(html, {
+    status: 200,
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function htmlPage(title, bodyHtml, status = 200) {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)} — MyHomeGames</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      background: #0b0b0c; color: #f2f2f2;
+    }
+    main {
+      width: min(420px, 92vw); padding: 2rem;
+      border: 1px solid rgba(255,255,255,.12); border-radius: 16px;
+      background: rgba(255,255,255,.04);
+    }
+    h1 { margin: 0 0 .75rem; font-size: 1.4rem; }
+    p { margin: 0 0 .75rem; color: rgba(255,255,255,.75); line-height: 1.45; }
+    a { color: #e5a00d; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtml(title)}</h1>
+    ${bodyHtml}
+  </main>
+</body>
+</html>`;
+  return new Response(html, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
 }
 
 async function ensureUserTunnelRouting(accountApi, tunnelId, username, headers) {
@@ -526,7 +931,10 @@ function isAllowedCorsOrigin(origin) {
     if (host === "localhost" || host === "127.0.0.1") return true;
     if (host.endsWith(USER_TUNNEL_HOST_SUFFIX)) return true;
     if (host === MANAGER_HOST) return true;
-  } catch { return false; }
+    if (host.endsWith(".myhomegames.vige.it") || host === "myhomegames.vige.it") return true;
+  } catch {
+    return false;
+  }
   return false;
 }
 
@@ -537,7 +945,9 @@ function corsPreflight(request, options) {
   });
 }
 
-function jsonWithCors(request, data, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...corsHeaders(request) } });
+function jsonWithCors(request, data, status = 200, options) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders(request, options) },
+  });
 }
-

@@ -15,3 +15,11 @@ zone_name = "vige.it"
 
 [vars]
 MYGAMES_ACCOUNT_ID = "d2633016ba82b226e5596563e44ced6d"
+
+# Smart TV device-code pairing sessions (TTL ~10 min).
+# Create: npx wrangler kv namespace create DEVICE_PAIRING
+# then replace id / preview_id with the values from the CLI output.
+[[kv_namespaces]]
+binding = "DEVICE_PAIRING"
+id = "REPLACE_WITH_DEVICE_PAIRING_KV_ID"
+preview_id = "REPLACE_WITH_DEVICE_PAIRING_KV_PREVIEW_ID"

@@ -6,13 +6,13 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 
 | File | Role |
 |------|------|
-| `worker.js` | Entry point: routing, `/api/get-token`, `/igdb/*` forward |
+| `worker.js` | Entry point: routing, `/api/get-token`, device pairing, `/igdb/*` forward |
 
 ### Worker routes (`wrangler.toml`)
 
 | Route | Handler |
 |-------|---------|
-| `myhomegames-server.vige.it/*` | Landing + `/api/get-token` + `/api/turn-ice-servers` |
+| `myhomegames-server.vige.it/*` | Landing + `/api/get-token` + device pairing + `/api/turn-ice-servers` |
 | `*-myhomegames-server.vige.it/igdb/*` | Inject Twitch headers, forward to Node |
 | Other paths on `<user>-myhomegames-server.vige.it` | Direct to tunnel → Node (no worker) |
 | `<user>-moonlight-web.vige.it` | Direct to tunnel → Moonlight Web `:8080` (no worker) |
@@ -36,6 +36,11 @@ npx wrangler secret put TWITCH_CLIENT_SECRET
 # Realtime TURN (browser remote play) — create key in Dashboard → Realtime → TURN
 npx wrangler secret put CLOUDFLARE_TURN_KEY_ID
 npx wrangler secret put CLOUDFLARE_TURN_API_TOKEN
+
+# KV for Smart TV device-code pairing (required before deploy)
+npx wrangler kv namespace create DEVICE_PAIRING
+npx wrangler kv namespace create DEVICE_PAIRING --preview
+# Paste the ids into wrangler.toml [[kv_namespaces]] binding DEVICE_PAIRING
 ```
 
 Do **not** put TURN key/token in `myhomegames-server` `.env` or release packages. Home servers call `POST /api/turn-ice-servers` on this Worker; only short-lived ICE credentials leave Cloudflare.
@@ -51,6 +56,12 @@ Do **not** put TURN key/token in `myhomegames-server` `.env` or release packages
 - `<username>` is slugified from the **full email** (local + domain), e.g. `luca.stancapiano@vige.it` → `luca-stancapiano-vige-it`.
 - JSON response: `token`, `url` (API hostname; Moonlight URL is derived by the server as `https://<username>-moonlight-web.vige.it`).
 - `POST /api/turn-ice-servers` — mints short-lived Cloudflare Realtime TURN ICE servers for Moonlight Web (Worker secrets; used by home `myhomegames-server`). In Cloudflare Access, add a **Bypass** policy for this path so the home server can call it without a browser JWT.
+- **Smart TV device pairing** (Access stays on the phone, not on the TV remote):
+  - `POST /api/device/code` — creates a short-lived PIN session (KV `DEVICE_PAIRING`).
+  - `GET /api/device/poll?device_code=` — TV polls until approved (`authorization_pending` | `expired` | `ok` + `{ token, url }`).
+  - `GET /link` — phone UI to enter the PIN.
+  - `GET /api/device/approve?user_code=` — requires Access JWT; mints the same tunnel payload as `get-token`.
+  - In Cloudflare Access, add **Bypass** policies for: `/api/device/code`, `/api/device/poll`, and `/link` (keep `/api/device/approve` and `/api/get-token` behind Access).
 
 ### Config
 
@@ -85,6 +96,9 @@ Other API paths on the same host (e.g. `/library`, `/collections`) bypass the wo
 ```
 [Access] → worker @ myhomegames-server.vige.it
            /api/get-token → tunnel token
+
+[TV]  POST /api/device/code → PIN + poll
+[Phone] /link → Access → /api/device/approve → TV poll gets token/url
 
 [PC] cloudflared → localhost:4000
 
