@@ -21,5 +21,5 @@ MYGAMES_ACCOUNT_ID = "d2633016ba82b226e5596563e44ced6d"
 # then replace id / preview_id with the values from the CLI output.
 [[kv_namespaces]]
 binding = "DEVICE_PAIRING"
-id = "REPLACE_WITH_DEVICE_PAIRING_KV_ID"
-preview_id = "REPLACE_WITH_DEVICE_PAIRING_KV_PREVIEW_ID"
+id = "8162b80010014785af1313369e9bbf53"
+preview_id = "57e5a97beb3f444e9a9a27dd651f58c9"
