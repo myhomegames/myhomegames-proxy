@@ -6,13 +6,14 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 
 | File | Role |
 |------|------|
-| `worker.js` | Entry point: routing, `/api/get-token`, device pairing, `/igdb/*` forward |
+| `worker.js` | Entry point: routing, `/api/get-token`, device pairing, deprovision, `/igdb/*` forward |
+| `scripts/deprovision-user.mjs` | CLI helper to call `POST /api/deprovision-user` |
 
 ### Worker routes (`wrangler.toml`)
 
 | Route | Handler |
 |-------|---------|
-| `myhomegames-server.vige.it/*` | Landing + `/api/get-token` + device pairing + `/api/turn-ice-servers` |
+| `myhomegames-server.vige.it/*` | Landing + `/api/get-token` + device pairing + `/api/turn-ice-servers` + `/api/deprovision-user` |
 | `*-myhomegames-server.vige.it/igdb/*` | Inject Twitch headers, forward to Node |
 | Other paths on `<user>-myhomegames-server.vige.it` | Direct to tunnel → Node (no worker) |
 | `<user>-moonlight-web.vige.it` | Direct to tunnel → Moonlight Web `:8080` (no worker) |
@@ -36,6 +37,11 @@ npx wrangler secret put TWITCH_CLIENT_SECRET
 # Realtime TURN (browser remote play) — create key in Dashboard → Realtime → TURN
 npx wrangler secret put CLOUDFLARE_TURN_KEY_ID
 npx wrangler secret put CLOUDFLARE_TURN_API_TOKEN
+
+# Optional: script-only deprovision without a browser Access session
+# npx wrangler secret put DEPROVISION_SECRET
+# Optional lock-down: only these Access emails may call deprovision
+# DEPROVISION_ADMIN_EMAILS = "you@example.com"
 
 # KV for Smart TV device-code pairing (required before deploy)
 npx wrangler kv namespace create DEVICE_PAIRING
@@ -62,6 +68,41 @@ Do **not** put TURN key/token in `myhomegames-server` `.env` or release packages
   - `GET /link` — phone UI to enter the PIN.
   - `GET /api/device/approve?user_code=` — requires Access JWT; mints the same tunnel payload as `get-token`.
   - In Cloudflare Access, add **Bypass** policies for: `/api/device/code`, `/api/device/poll`, and `/link` (keep `/api/device/approve` and `/api/get-token` behind Access).
+- `POST /api/deprovision-user` — full cleanup for a user email:
+  - Revokes Cloudflare Access sessions
+  - Deletes the Zero Trust / Access user (and seats)
+  - Removes the email from Access Groups / application policies when listed as an include rule
+  - Deletes tunnel `MyHomeGames-<username>` and DNS CNAMEs (API + Moonlight)
+  - Does **not** delete the identity in the IdP (Google, etc.)
+  Auth (no secret required when signed in):
+  - **Preferred:** Cloudflare Access JWT from your browser session
+  - Optional: `X-MHG-Deprovision-Secret` if `DEPROVISION_SECRET` is set (for curl/scripts)
+  - Optional: `DEPROVISION_ADMIN_EMAILS` to restrict which Access identities may call it
+  - Keep `/api/deprovision-user` and `/deprovision` **behind Access** (do not Bypass) so only signed-in users can reach them
+  - API token needs Tunnel + DNS edit plus Access users/groups/apps write (`Access: Users Write`, Organizations/Groups, Apps & Policies).
+
+```bash
+# Admin CLI (recommended): put the API token in .env — no Access login
+cp .env.example .env
+# edit .env → MYGAMES_CF_API_TOKEN=...  (same as Worker secret MYGAMES_CF_API_TOKEN)
+npm run deprovision-user -- user@example.com
+
+# Browser UI (needs Cloudflare Access session on myhomegames-server.vige.it):
+open "https://myhomegames-server.vige.it/deprovision?email=user@example.com"
+```
+
+Note: being logged into the Cloudflare **dashboard** is not the same as an Access
+session on `myhomegames-server.vige.it`. Prefer the CLI + `.env` token above.
+`.env` is gitignored.
+
+Removes:
+- Access / Zero Trust user identity + sessions
+- Email allowlist entries in Access Groups / policies (when present)
+- Tunnel `MyHomeGames-<username>`
+- CNAME `<username>-myhomegames-server.vige.it`
+- CNAME `<username>-moonlight-web.vige.it`
+
+Cloudflare has **no** automatic hook when you delete someone only in the IdP, so call this endpoint explicitly when offboarding.
 
 ### Config
 

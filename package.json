@@ -3,7 +3,8 @@
   "version": "1.2.1",
   "private": true,
   "scripts": {
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "deprovision-user": "node scripts/deprovision-user.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.114.0"
