@@ -6,8 +6,20 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 
 | File | Role |
 |------|------|
-| `worker.js` | Entry point: routing, `/api/get-token`, device pairing, deprovision, `/igdb/*` forward |
-| `scripts/deprovision-user.mjs` | CLI helper to call `POST /api/deprovision-user` |
+| `worker.js` | Thin entry: route dispatch |
+| `src/config.js` | Hosts, zone id, constants |
+| `src/hostnames.js` | Email → tunnel username / host helpers |
+| `src/http.js` | CORS, JSON, HTML helpers |
+| `src/access-auth.js` | Cloudflare Access JWT / cookie |
+| `src/routes.js` | `pickRoute` |
+| `src/get-token.js` | `/api/get-token` |
+| `src/device-pairing.js` | Device code / poll / approve / `/link` |
+| `src/deprovision.js` | `/deprovision` + `/api/deprovision-user` |
+| `src/tunnel.js` | Mint tunnel + ingress/DNS ensure |
+| `src/dns.js` | DNS CNAME helpers |
+| `src/turn.js` | `/api/turn-ice-servers` |
+| `src/igdb.js` | IGDB gateway / subdomain forward |
+| `scripts/deprovision-user.mjs` | CLI admin deprovision via Cloudflare API |
 
 ### Worker routes (`wrangler.toml`)
 
