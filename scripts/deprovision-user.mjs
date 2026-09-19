@@ -3,8 +3,9 @@
  * Deprovision a user via the Cloudflare API (admin / wrangler token).
  * Does not need Cloudflare Access login or DEPROVISION_SECRET.
  *
- * Removes: Access identity + sessions, Access group/policy email rules,
- * tunnel MyHomeGames-<username>, DNS CNAMEs (API + Moonlight).
+ * Removes: Access sessions, Zero Trust seat (Inactive), Access group/policy
+ * email rules, tunnel MyHomeGames-<username>, DNS CNAMEs (API + Moonlight).
+ * Cloudflare keeps Inactive rows under Team & Resources → Users.
  *
  * Usage:
  *   # put MYGAMES_CF_API_TOKEN in myhomegames-proxy/.env (gitignored), then:
@@ -50,7 +51,7 @@ Add to myhomegames-proxy/.env (gitignored):
   MYGAMES_CF_API_TOKEN=...
 
 Same token as the Worker secret MYGAMES_CF_API_TOKEN.
-Needs Tunnel + DNS edit and Access Users/Groups/Apps write.
+Needs Tunnel + DNS edit, Access Users/Groups/Apps write, and Zero Trust: Seats Write.
 
 Then:
   npm run deprovision-user -- ${email}
@@ -154,6 +155,63 @@ async function cfJson(url, init) {
   return { res, data };
 }
 
+async function listAccessUsersByEmail(accountApi, headers, userEmail) {
+  const byEmail = await cfJson(
+    `${accountApi}/access/users?email=${encodeURIComponent(userEmail)}&per_page=100`,
+    { headers },
+  );
+  let users = Array.isArray(byEmail.data?.result) ? byEmail.data.result : [];
+  let status = byEmail.res.status;
+  let errors = byEmail.data?.errors || null;
+  let ok = Boolean(byEmail.data?.success) || byEmail.res.status === 200;
+
+  if (users.length === 0 && ok) {
+    const search = await cfJson(
+      `${accountApi}/access/users?search=${encodeURIComponent(userEmail)}&per_page=100`,
+      { headers },
+    );
+    status = search.res.status;
+    errors = search.data?.errors || null;
+    ok = Boolean(search.data?.success) || search.res.status === 200;
+    users = (Array.isArray(search.data?.result) ? search.data.result : []).filter(
+      (u) => String(u?.email || "").toLowerCase() === userEmail,
+    );
+  }
+
+  const seen = new Set();
+  users = users.filter((u) => {
+    const id = u?.id || u?.uid;
+    if (!id) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+
+  return { ok, status, errors, users };
+}
+
+async function deactivateZeroTrustSeat(accountApi, headers, seatUid, userEmail) {
+  const patch = await cfJson(`${accountApi}/access/seats`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify([
+      {
+        seat_uid: seatUid,
+        access_seat: false,
+        gateway_seat: false,
+      },
+    ]),
+  });
+  return {
+    seat_uid: seatUid,
+    email: userEmail || null,
+    ok: Boolean(patch.data?.success) || patch.res.status === 200,
+    status: patch.res.status,
+    errors: patch.data?.errors || null,
+    result: Array.isArray(patch.data?.result) ? patch.data.result : null,
+  };
+}
+
 async function deleteAccessIdentity(accountApi, headers, userEmail) {
   const revoke = await cfJson(`${accountApi}/access/organizations/revoke_user`, {
     method: "POST",
@@ -161,25 +219,16 @@ async function deleteAccessIdentity(accountApi, headers, userEmail) {
     body: JSON.stringify({ email: userEmail, devices: true }),
   });
 
-  let users = [];
-  const byEmail = await cfJson(
-    `${accountApi}/access/users?email=${encodeURIComponent(userEmail)}&per_page=100`,
-    { headers },
-  );
-  users = Array.isArray(byEmail.data?.result) ? byEmail.data.result : [];
-  if (users.length === 0) {
-    const search = await cfJson(
-      `${accountApi}/access/users?search=${encodeURIComponent(userEmail)}&per_page=100`,
-      { headers },
-    );
-    users = (Array.isArray(search.data?.result) ? search.data.result : []).filter(
-      (u) => String(u?.email || "").toLowerCase() === userEmail,
-    );
-  }
-
+  const listed = await listAccessUsersByEmail(accountApi, headers, userEmail);
+  const seats = [];
   const deletedUsers = [];
-  for (const user of users) {
+
+  for (const user of listed.users) {
     const userId = user?.id || user?.uid;
+    const seatUid = user?.seat_uid || userId || null;
+    if (seatUid) {
+      seats.push(await deactivateZeroTrustSeat(accountApi, headers, seatUid, user.email || userEmail));
+    }
     if (!userId) continue;
     const del = await cfJson(`${accountApi}/access/users/${userId}`, {
       method: "DELETE",
@@ -188,6 +237,7 @@ async function deleteAccessIdentity(accountApi, headers, userEmail) {
     deletedUsers.push({
       id: userId,
       email: user.email || userEmail,
+      seat_uid: user.seat_uid || null,
       deleted: Boolean(del.data?.success) || del.res.status === 200 || del.res.status === 404,
       status: del.res.status,
       errors: del.data?.errors || null,
@@ -196,6 +246,9 @@ async function deleteAccessIdentity(accountApi, headers, userEmail) {
 
   const groups = await stripEmailFromAccessGroups(accountApi, headers, userEmail);
   const policies = await stripEmailFromAccessPolicies(accountApi, headers, userEmail);
+  const seatsOk = seats.length === 0 || seats.every((s) => s.ok);
+  const usersOk =
+    deletedUsers.length === 0 || deletedUsers.every((u) => u.deleted);
 
   return {
     revoke: {
@@ -206,21 +259,27 @@ async function deleteAccessIdentity(accountApi, headers, userEmail) {
       status: revoke.res.status,
       errors: revoke.data?.errors || null,
     },
+    list: { ok: listed.ok, status: listed.status, errors: listed.errors },
+    seats,
     users: deletedUsers,
-    userFound: deletedUsers.length > 0,
+    userFound: listed.users.length > 0,
     groups,
     policies,
     ok:
       (Boolean(revoke.data?.success) ||
         revoke.res.status === 200 ||
         revoke.res.status === 404) &&
-      (deletedUsers.length === 0 || deletedUsers.every((u) => u.deleted)) &&
+      listed.ok &&
+      seatsOk &&
+      usersOk &&
       groups.every((g) => g.ok || g.skipped) &&
       policies.every((p) => p.ok || p.skipped),
     note:
-      deletedUsers.length === 0
-        ? "No Access user record found (may already be removed)."
-        : "Access user deleted. IdP account (e.g. Google) is not deleted by Cloudflare.",
+      listed.users.length === 0
+        ? listed.ok
+          ? "No Access user record found (may already be inactive). Cloudflare keeps Inactive rows under Team & Resources → Users."
+          : "Failed to list Access users — check API token permissions."
+        : "Seat deactivated (Inactive). Cloudflare does not erase Team & Resources → Users rows; IdP accounts are not deleted.",
   };
 }
 

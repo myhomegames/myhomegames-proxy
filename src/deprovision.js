@@ -68,8 +68,11 @@ export async function deprovisionUserResources(env, email) {
 }
 
 /**
- * Revoke Access sessions, delete Zero Trust user seat(s), and strip email from
- * Access Groups / application policies when present as an include rule.
+ * Revoke Access sessions, deactivate Zero Trust seats (dashboard "Remove users"),
+ * best-effort DELETE Access user, and strip email from Access Groups / policies.
+ *
+ * Cloudflare cannot fully erase Team & Resources → Users rows: after seat removal
+ * the user stays listed as Inactive. See seat-management docs.
  */
 export async function deleteAccessIdentity(accountApi, headers, email) {
   const revokeResp = await fetch(accountApi + "/access/organizations/revoke_user", {
@@ -84,16 +87,16 @@ export async function deleteAccessIdentity(accountApi, headers, email) {
     errors: revokeData?.errors || null,
   };
 
-  const usersResp = await fetch(
-    accountApi + "/access/users?email=" + encodeURIComponent(email) + "&per_page=100",
-    { headers },
-  );
-  const usersData = await usersResp.json().catch(() => ({}));
-  const users = Array.isArray(usersData?.result) ? usersData.result : [];
+  const listed = await listAccessUsersByEmail(accountApi, headers, email);
+  const seats = [];
   const deletedUsers = [];
 
-  for (const user of users) {
+  for (const user of listed.users) {
     const userId = user?.id || user?.uid;
+    const seatUid = user?.seat_uid || userId || null;
+    if (seatUid) {
+      seats.push(await deactivateZeroTrustSeat(accountApi, headers, seatUid, user.email || email));
+    }
     if (!userId) continue;
     const delResp = await fetch(accountApi + "/access/users/" + userId, {
       method: "DELETE",
@@ -110,54 +113,98 @@ export async function deleteAccessIdentity(accountApi, headers, email) {
     });
   }
 
-  // If list-by-email returned nothing, try a broader search (some accounts only match via `search`).
-  if (users.length === 0) {
+  const groups = await stripEmailFromAccessGroups(accountApi, headers, email);
+  const policies = await stripEmailFromAccessPolicies(accountApi, headers, email);
+
+  const seatsOk = seats.length === 0 || seats.every((s) => s.ok);
+  const usersOk =
+    deletedUsers.length === 0 || deletedUsers.every((u) => u.deleted);
+  const groupsOk = groups.every((g) => g.ok || g.skipped);
+  const policiesOk = policies.every((p) => p.ok || p.skipped);
+  const listOk = listed.ok;
+
+  return {
+    revoke,
+    list: { ok: listOk, status: listed.status, errors: listed.errors },
+    seats,
+    users: deletedUsers,
+    userFound: listed.users.length > 0,
+    groups,
+    policies,
+    ok: revoke.ok && listOk && seatsOk && usersOk && groupsOk && policiesOk,
+    note:
+      listed.users.length === 0
+        ? listOk
+          ? "No Access user record found for this email (may already be inactive). Sessions revoked; groups/policies updated when applicable. Cloudflare keeps Inactive rows under Team & Resources → Users."
+          : "Failed to list Access users — check API token permissions (Access: Audit Logs Read / Users)."
+        : "Seat deactivated (Inactive) and sessions revoked. Cloudflare does not erase Team & Resources → Users rows; IdP accounts (e.g. Google) are not deleted.",
+  };
+}
+
+/** List Access / Zero Trust users matching an email (email filter, then search). */
+export async function listAccessUsersByEmail(accountApi, headers, email) {
+  const byEmailResp = await fetch(
+    accountApi + "/access/users?email=" + encodeURIComponent(email) + "&per_page=100",
+    { headers },
+  );
+  const byEmailData = await byEmailResp.json().catch(() => ({}));
+  let users = Array.isArray(byEmailData?.result) ? byEmailData.result : [];
+  let status = byEmailResp.status;
+  let errors = byEmailData?.errors || null;
+  let ok = Boolean(byEmailData?.success) || byEmailResp.status === 200;
+
+  if (users.length === 0 && ok) {
     const searchResp = await fetch(
       accountApi + "/access/users?search=" + encodeURIComponent(email) + "&per_page=100",
       { headers },
     );
     const searchData = await searchResp.json().catch(() => ({}));
-    const matches = (Array.isArray(searchData?.result) ? searchData.result : []).filter(
+    status = searchResp.status;
+    errors = searchData?.errors || null;
+    ok = Boolean(searchData?.success) || searchResp.status === 200;
+    users = (Array.isArray(searchData?.result) ? searchData.result : []).filter(
       (u) => String(u?.email || "").toLowerCase() === email,
     );
-    for (const user of matches) {
-      const userId = user?.id || user?.uid;
-      if (!userId || deletedUsers.some((d) => d.id === userId)) continue;
-      const delResp = await fetch(accountApi + "/access/users/" + userId, {
-        method: "DELETE",
-        headers,
-      });
-      const delData = await delResp.json().catch(() => ({}));
-      deletedUsers.push({
-        id: userId,
-        email: user.email || email,
-        seat_uid: user.seat_uid || null,
-        deleted: Boolean(delData?.success) || delResp.status === 200 || delResp.status === 404,
-        status: delResp.status,
-        errors: delData?.errors || null,
-      });
-    }
   }
 
-  const groups = await stripEmailFromAccessGroups(accountApi, headers, email);
-  const policies = await stripEmailFromAccessPolicies(accountApi, headers, email);
+  // Deduplicate by id/uid.
+  const seen = new Set();
+  users = users.filter((u) => {
+    const id = u?.id || u?.uid;
+    if (!id) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 
-  const usersOk =
-    deletedUsers.length === 0 || deletedUsers.every((u) => u.deleted);
-  const groupsOk = groups.every((g) => g.ok || g.skipped);
-  const policiesOk = policies.every((p) => p.ok || p.skipped);
+  return { ok, status, errors, users };
+}
 
+/**
+ * Same action as Zero Trust dashboard → Users → Action → Remove users:
+ * PATCH /access/seats with access_seat + gateway_seat false.
+ * Requires token permission: Zero Trust: Seats Write.
+ */
+export async function deactivateZeroTrustSeat(accountApi, headers, seatUid, email) {
+  const resp = await fetch(accountApi + "/access/seats", {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify([
+      {
+        seat_uid: seatUid,
+        access_seat: false,
+        gateway_seat: false,
+      },
+    ]),
+  });
+  const data = await resp.json().catch(() => ({}));
   return {
-    revoke,
-    users: deletedUsers,
-    userFound: deletedUsers.length > 0,
-    groups,
-    policies,
-    ok: revoke.ok && usersOk && groupsOk && policiesOk,
-    note:
-      deletedUsers.length === 0
-        ? "No Access user record found for this email (may already be removed). Sessions revoked; groups/policies updated when applicable."
-        : "Access user deleted and sessions revoked. IdP account (e.g. Google) is not deleted by Cloudflare.",
+    seat_uid: seatUid,
+    email: email || null,
+    ok: Boolean(data?.success) || resp.status === 200,
+    status: resp.status,
+    errors: data?.errors || null,
+    result: Array.isArray(data?.result) ? data.result : null,
   };
 }
 
@@ -433,7 +480,7 @@ export function handleDeprovisionPage(request) {
   const prefillEmail = escapeHtml(urlEmail);
 
   const body = `${signedIn}
-    <p>Remove Access identity, tunnel, and DNS for a user email.</p>
+    <p>Revoke Access sessions, deactivate the Zero Trust seat (Inactive), remove email from groups/policies when listed, and delete tunnel + DNS. Cloudflare keeps Inactive rows under Team &amp; Resources → Users.</p>
     <form id="deprovision-form">
       <label for="email">User email</label>
       <input id="email" name="email" type="email" required autocomplete="off" value="${prefillEmail}"

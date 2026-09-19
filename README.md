@@ -81,17 +81,19 @@ Do **not** put TURN key/token in `myhomegames-server` `.env` or release packages
   - `GET /api/device/approve?user_code=` — requires Access JWT; mints the same tunnel payload as `get-token`.
   - In Cloudflare Access, add **Bypass** policies for: `/api/device/code`, `/api/device/poll`, and `/link` (keep `/api/device/approve` and `/api/get-token` behind Access).
 - `POST /api/deprovision-user` — full cleanup for a user email:
-  - Revokes Cloudflare Access sessions
-  - Deletes the Zero Trust / Access user (and seats)
+  - Revokes Cloudflare Access sessions (+ devices)
+  - Deactivates the Zero Trust **seat** (`PATCH /access/seats` — same as dashboard Action → Remove users; user becomes **Inactive**)
+  - Best-effort `DELETE /access/users/{id}`
   - Removes the email from Access Groups / application policies when listed as an include rule
   - Deletes tunnel `MyHomeGames-<username>` and DNS CNAMEs (API + Moonlight)
   - Does **not** delete the identity in the IdP (Google, etc.)
+  - **Limitation (Cloudflare):** Team & Resources → Users rows are never fully erased; Inactive users stay visible and do not consume a seat. A later login can reactivate the seat if policies still allow it.
   Auth (no secret required when signed in):
   - **Preferred:** Cloudflare Access JWT from your browser session
   - Optional: `X-MHG-Deprovision-Secret` if `DEPROVISION_SECRET` is set (for curl/scripts)
   - Optional: `DEPROVISION_ADMIN_EMAILS` to restrict which Access identities may call it
   - Keep `/api/deprovision-user` and `/deprovision` **behind Access** (do not Bypass) so only signed-in users can reach them
-  - API token needs Tunnel + DNS edit plus Access users/groups/apps write (`Access: Users Write`, Organizations/Groups, Apps & Policies).
+  - API token needs Tunnel + DNS edit plus Access users/groups/apps write and **`Zero Trust: Seats Write`** (`Access: Users Write`, Organizations/Groups, Apps & Policies, Seats Write).
 
 ```bash
 # Admin CLI (recommended): put the API token in .env — no Access login
@@ -107,8 +109,9 @@ Note: being logged into the Cloudflare **dashboard** is not the same as an Acces
 session on `myhomegames-server.vige.it`. Prefer the CLI + `.env` token above.
 `.env` is gitignored.
 
-Removes:
-- Access / Zero Trust user identity + sessions
+Removes / deactivates:
+- Access sessions
+- Zero Trust seat (user shows as **Inactive** under Team & Resources → Users — Cloudflare cannot delete that row)
 - Email allowlist entries in Access Groups / policies (when present)
 - Tunnel `MyHomeGames-<username>`
 - CNAME `<username>-myhomegames-server.vige.it`
