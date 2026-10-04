@@ -20,6 +20,7 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 | `src/turn.js` | `/api/turn-ice-servers` |
 | `src/igdb.js` | IGDB gateway / subdomain forward |
 | `scripts/deprovision-user.mjs` | CLI admin deprovision via Cloudflare API |
+| `scripts/list-users.mjs` | CLI list of Access emails and tunnel status |
 
 ### Worker routes (`wrangler.toml`)
 
@@ -100,6 +101,7 @@ Do **not** put TURN key/token in `myhomegames-server` `.env` or release packages
 cp .env.example .env
 # edit .env → MYGAMES_CF_API_TOKEN=...  (same as Worker secret MYGAMES_CF_API_TOKEN)
 npm run deprovision-user -- user@example.com
+npm run list-users
 
 # Browser UI (needs Cloudflare Access session on myhomegames-server.vige.it):
 open "https://myhomegames-server.vige.it/deprovision?email=user@example.com"

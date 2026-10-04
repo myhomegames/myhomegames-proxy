@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
-    "deprovision-user": "node scripts/deprovision-user.mjs"
+    "deprovision-user": "node scripts/deprovision-user.mjs",
+    "list-users": "node scripts/list-users.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.114.0"
