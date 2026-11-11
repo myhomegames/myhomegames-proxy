@@ -1,6 +1,6 @@
 # MyHomeGames Proxy
 
-Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch credential injection.
+Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch and OpenAI credential injection.
 
 ## Project layout
 
@@ -19,6 +19,7 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 | `src/dns.js` | DNS CNAME helpers |
 | `src/turn.js` | `/api/turn-ice-servers` |
 | `src/igdb.js` | IGDB gateway / subdomain forward |
+| `src/openai.js` | OpenAI folder-import + settings credential/flag injection |
 | `scripts/deprovision-user.mjs` | CLI admin deprovision via Cloudflare API |
 | `scripts/list-users.mjs` | CLI list of Access emails and tunnel status |
 
@@ -28,6 +29,9 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch creden
 |-------|---------|
 | `myhomegames-server.vige.it/*` | Landing + `/api/get-token` + device pairing + `/api/turn-ice-servers` + `/api/deprovision-user` |
 | `*-myhomegames-server.vige.it/igdb/*` | Inject Twitch headers, forward to Node |
+| `*-myhomegames-server.vige.it/games/import-from-folder*` | Inject OpenAI headers, forward to Node |
+| `*-myhomegames-server.vige.it/games/pick-import-folder*` | Inject OpenAI headers, forward to Node |
+| `*-myhomegames-server.vige.it/settings*` | Inject AI-configured flag (no key in JSON), forward to Node |
 | Other paths on `<user>-myhomegames-server.vige.it` | Direct to tunnel → Node (no worker) |
 | `<user>-moonlight-web.vige.it` | Direct to tunnel → Moonlight Web `:8080` (no worker) |
 
@@ -47,6 +51,11 @@ npx wrangler login
 npx wrangler secret put MYGAMES_CF_API_TOKEN
 npx wrangler secret put TWITCH_CLIENT_ID
 npx wrangler secret put TWITCH_CLIENT_SECRET
+# Shared OpenAI-compatible key for "Import from a folder" (all tunnel users; never returned to browsers)
+npx wrangler secret put OPENAI_API_KEY
+# Optional OpenAI-compatible gateway (Groq, OpenRouter, …) — can be secrets or [vars]:
+# npx wrangler secret put OPENAI_BASE_URL
+# npx wrangler secret put OPENAI_MODEL
 # Realtime TURN (browser remote play) — create key in Dashboard → Realtime → TURN
 npx wrangler secret put CLOUDFLARE_TURN_KEY_ID
 npx wrangler secret put CLOUDFLARE_TURN_API_TOKEN
@@ -149,6 +158,23 @@ Other API paths on the same host (e.g. `/library`, `/collections`) bypass the wo
 
 ---
 
+## OpenAI folder import (`/games/import-from-folder`, `/games/pick-import-folder`, `/settings`)
+
+Same pattern as Twitch/IGDB: the Worker holds one shared OpenAI-compatible key for every tunnel user. Browsers never receive the secret.
+
+1. **Strips** any client-sent `X-OpenAI-Api-Key` / `X-OpenAI-Base-Url` / `X-OpenAI-Model` (anti-spoofing).
+2. **Injects** credentials from Worker secrets (`OPENAI_API_KEY`, optional `OPENAI_BASE_URL` / `OPENAI_MODEL`).
+3. **Forwards** to the user tunnel → Node. Import routes require the key (`500` if missing).
+4. **`/settings`**: injects only `X-MHG-Ai-Configured: true|false` so the SPA can show/hide Import without leaking the key in JSON.
+
+### Errors
+
+| Response | Cause |
+|----------|--------|
+| `500` OpenAI secret missing | `OPENAI_API_KEY` not set on the worker (import/pick routes) |
+
+---
+
 ## How it works
 
 ```
@@ -162,6 +188,9 @@ Other API paths on the same host (e.g. `/library`, `/collections`) bypass the wo
 
 [App] → worker @ luca-myhomegames-server.vige.it/igdb/*
         → inject Twitch headers → tunnel → Node
+
+[App] → worker @ luca-myhomegames-server.vige.it/games/import-from-folder
+        → inject OpenAI headers → tunnel → Node
 
 [App] → luca-myhomegames-server.vige.it/library, /collections, …
         → tunnel → Node (no worker)

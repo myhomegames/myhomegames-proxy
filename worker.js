@@ -2,6 +2,7 @@ import { handleGetToken } from "./src/get-token.js";
 import { handleDeviceApprove, handleDeviceCode, handleDevicePoll, handleLinkPage } from "./src/device-pairing.js";
 import { handleDeprovisionPage, handleDeprovisionUser } from "./src/deprovision.js";
 import { forwardIgdbToTunnel, handleIgdbGatewayRelay } from "./src/igdb.js";
+import { forwardOpenAiProtectedToTunnel, forwardSettingsToTunnel } from "./src/openai.js";
 import { corsPreflight } from "./src/http.js";
 import { pickRoute } from "./src/routes.js";
 import { handleTurnIceServers } from "./src/turn.js";
@@ -17,6 +18,12 @@ export default {
     }
     if (route === "igdb-subdomain") {
       return forwardIgdbToTunnel(request, env, hostname);
+    }
+    if (route === "openai-subdomain") {
+      return forwardOpenAiProtectedToTunnel(request, env, hostname);
+    }
+    if (route === "settings-subdomain") {
+      return forwardSettingsToTunnel(request, env, hostname);
     }
     if (route === "landing") {
       return Response.redirect(new URL("/api/get-token", request.url).toString(), 302);

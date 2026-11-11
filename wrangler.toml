@@ -13,6 +13,20 @@ zone_name = "vige.it"
 pattern = "*-myhomegames-server.vige.it/igdb/*"
 zone_name = "vige.it"
 
+# Shared OpenAI-compatible credentials (folder import) — same pattern as Twitch/IGDB.
+[[routes]]
+pattern = "*-myhomegames-server.vige.it/games/import-from-folder*"
+zone_name = "vige.it"
+
+[[routes]]
+pattern = "*-myhomegames-server.vige.it/games/pick-import-folder*"
+zone_name = "vige.it"
+
+# Inject AI-configured flag for settings (never expose the API key in JSON).
+[[routes]]
+pattern = "*-myhomegames-server.vige.it/settings*"
+zone_name = "vige.it"
+
 [vars]
 MYGAMES_ACCOUNT_ID = "d2633016ba82b226e5596563e44ced6d"
 

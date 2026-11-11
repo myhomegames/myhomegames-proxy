@@ -4,6 +4,7 @@ import {
 } from "./config.js";
 import { isTunnelUserHost } from "./hostnames.js";
 import { isIgdbPath } from "./igdb.js";
+import { isOpenAiCredentialPath, isSettingsPath } from "./openai.js";
 
 export function pickRoute(hostname, pathname, method) {
   if (hostname === MANAGER_HOST && pathname.startsWith(`${IGDB_GATEWAY_PREFIX}/`)) {
@@ -11,6 +12,12 @@ export function pickRoute(hostname, pathname, method) {
   }
   if (isIgdbPath(pathname) && isTunnelUserHost(hostname)) {
     return "igdb-subdomain";
+  }
+  if (isOpenAiCredentialPath(pathname) && isTunnelUserHost(hostname)) {
+    return "openai-subdomain";
+  }
+  if (isSettingsPath(pathname) && isTunnelUserHost(hostname)) {
+    return "settings-subdomain";
   }
   if (pathname === "/" && hostname === MANAGER_HOST) {
     return "landing";
