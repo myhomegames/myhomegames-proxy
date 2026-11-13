@@ -10,6 +10,19 @@
  * Usage:
  *   # put MYGAMES_CF_API_TOKEN in myhomegames-proxy/.env (gitignored), then:
  *   npm run deprovision-user -- user@example.com
+ *   npm run deprovision-user -- a@example.com b@example.com c@example.com
+ *
+ *   # by tunnel STATUS (same column as `npm run list-users`; default: inactive):
+ *   npm run deprovision-user -- --status
+ *   npm run deprovision-user -- --status inactive
+ *   npm run deprovision-user -- --status down
+ *   npm run deprovision-user -- --status down,inactive,none
+ *
+ *   # by Zero Trust SEAT (active|inactive):
+ *   npm run deprovision-user -- --seat inactive
+ *
+ *   # emails + filters:
+ *   npm run deprovision-user -- --status inactive a@example.com b@example.com
  *
  *   # or inline / shell:
  *   MYGAMES_CF_API_TOKEN=... npm run deprovision-user -- user@example.com
@@ -29,10 +42,33 @@ const USER_TUNNEL_HOST_SUFFIX = "-myhomegames-server.vige.it";
 const USER_MOONLIGHT_HOST_SUFFIX = "-moonlight-web.vige.it";
 const ZONE_ID = "243802546c0a2d88201fe78091fa3e84";
 const DEFAULT_ACCOUNT_ID = "d2633016ba82b226e5596563e44ced6d";
+const TUNNEL_PREFIX = "MyHomeGames-";
+const KNOWN_TUNNEL_STATUSES = new Set([
+  "inactive",
+  "down",
+  "none",
+  "healthy",
+  "degraded",
+  "unknown",
+]);
+const USAGE = `Usage:
+  npm run deprovision-user -- user@example.com [more@example.com ...]
+  npm run deprovision-user -- --status [inactive|down|none|healthy|degraded]
+  npm run deprovision-user -- --status down,inactive,none
+  npm run deprovision-user -- --seat [inactive|active]
 
-const email = String(process.argv[2] || "").trim().toLowerCase();
-if (!email || !email.includes("@")) {
-  console.error("Usage: npm run deprovision-user -- user@example.com");
+--status matches the STATUS column from \`npm run list-users\` (tunnel status).
+Default for --status with no value: inactive.
+--seat matches the SEAT column (Zero Trust access_seat / gateway_seat).`;
+
+const parsed = parseArgs(process.argv.slice(2));
+if (parsed.errors.length > 0) {
+  console.error(parsed.errors.join("\n"));
+  console.error(USAGE);
+  process.exit(1);
+}
+if (parsed.emails.length === 0 && !parsed.tunnelStatuses && !parsed.seatFilter) {
+  console.error(USAGE);
   process.exit(1);
 }
 
@@ -54,7 +90,8 @@ Same token as the Worker secret MYGAMES_CF_API_TOKEN.
 Needs Tunnel + DNS edit, Access Users/Groups/Apps write, and Zero Trust: Seats Write.
 
 Then:
-  npm run deprovision-user -- ${email}
+  npm run deprovision-user -- --status
+  npm run deprovision-user -- user@example.com
 `);
   process.exit(1);
 }
@@ -64,39 +101,291 @@ const headers = {
   "Content-Type": "application/json",
 };
 const accountApi = `https://api.cloudflare.com/client/v4/accounts/${accountId}`;
-const username = usernameFromEmail(email);
-const tunnelName = `MyHomeGames-${username}`;
-const apiHostname = `${username}${USER_TUNNEL_HOST_SUFFIX}`;
-const moonlightHostname = `${username}${USER_MOONLIGHT_HOST_SUFFIX}`;
 
-console.log(`Deprovisioning ${email}`);
-console.log(`  username: ${username}`);
-console.log(`  tunnel:   ${tunnelName}`);
-console.log(`  dns:      ${apiHostname}, ${moonlightHostname}`);
+let emails = parsed.emails;
+const useFilters = Boolean(parsed.tunnelStatuses || parsed.seatFilter);
+if (useFilters) {
+  const selected = await selectEmailsByFilters(accountApi, headers, {
+    tunnelStatuses: parsed.tunnelStatuses,
+    seatFilter: parsed.seatFilter,
+    emailFilter: emails,
+  });
+  if (selected.error) {
+    console.error(selected.error);
+    process.exit(1);
+  }
+  emails = selected.emails;
+  const bits = [];
+  if (parsed.tunnelStatuses) bits.push(`tunnel status in [${parsed.tunnelStatuses.join(", ")}]`);
+  if (parsed.seatFilter) bits.push(`seat=${parsed.seatFilter}`);
+  console.log(
+    `Selected ${emails.length} user(s) with ${bits.join(" and ")}` +
+      (parsed.emails.length ? " (filtered from CLI emails)" : "") +
+      (emails.length ? `:\n  ${emails.join("\n  ")}` : ""),
+  );
+  if (emails.length === 0) {
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          total: 0,
+          status: parsed.tunnelStatuses || null,
+          seat: parsed.seatFilter || null,
+          emails: [],
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(0);
+  }
+}
 
-const access = await deleteAccessIdentity(accountApi, headers, email);
-const dns = {
-  api: await deleteDnsCname(ZONE_ID, headers, apiHostname),
-  moonlight: await deleteDnsCname(ZONE_ID, headers, moonlightHostname),
-};
-const tunnels = await deleteTunnels(accountApi, headers, tunnelName);
+const results = [];
+for (const email of emails) {
+  const result = await deprovisionOneUser(accountApi, headers, email);
+  results.push(result);
+  console.log(JSON.stringify(result, null, 2));
+}
 
-const result = {
-  ok:
-    access.ok &&
-    (dns.api.deleted || dns.api.reason === "not_found") &&
-    (dns.moonlight.deleted || dns.moonlight.reason === "not_found") &&
-    (tunnels.length === 0 || tunnels.every((t) => t.deleted)),
-  email,
-  username,
-  tunnelName,
-  access,
-  dns,
-  tunnels,
-};
+const failed = results.filter((r) => !r.ok);
+if (results.length > 1 || useFilters) {
+  console.log(
+    JSON.stringify(
+      {
+        ok: failed.length === 0,
+        total: results.length,
+        succeeded: results.length - failed.length,
+        failed: failed.map((r) => r.email),
+        status: parsed.tunnelStatuses || null,
+        seat: parsed.seatFilter || null,
+      },
+      null,
+      2,
+    ),
+  );
+}
+process.exit(failed.length === 0 ? 0 : 1);
 
-console.log(JSON.stringify(result, null, 2));
-process.exit(result.ok ? 0 : 1);
+function parseStatusList(raw, fallback = "inactive") {
+  const text = String(raw || "").trim().toLowerCase();
+  if (!text) return [fallback];
+  return text
+    .split(/[,\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function takeOptionValue(argv, index, arg, longName, shortName) {
+  if (arg === longName || (shortName && arg === shortName)) {
+    const next = String(argv[index + 1] || "").trim().toLowerCase();
+    if (next && !next.startsWith("-") && !next.includes("@")) {
+      return { value: next, nextIndex: index + 1 };
+    }
+    return { value: "", nextIndex: index };
+  }
+  const longPrefix = `${longName}=`;
+  if (arg.startsWith(longPrefix)) {
+    return { value: arg.slice(longPrefix.length).trim().toLowerCase(), nextIndex: index };
+  }
+  if (shortName) {
+    const shortPrefix = `${shortName}=`;
+    if (arg.startsWith(shortPrefix)) {
+      return { value: arg.slice(shortPrefix.length).trim().toLowerCase(), nextIndex: index };
+    }
+  }
+  return null;
+}
+
+function parseArgs(argv) {
+  const emails = [];
+  const errors = [];
+  let tunnelStatuses = null;
+  let seatFilter = null;
+  let statusRequested = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = String(argv[i] || "").trim();
+    if (!arg) continue;
+
+    const statusOpt = takeOptionValue(argv, i, arg, "--status", "-s");
+    if (statusOpt) {
+      statusRequested = true;
+      tunnelStatuses = parseStatusList(statusOpt.value, "inactive");
+      i = statusOpt.nextIndex;
+      continue;
+    }
+
+    const seatOpt = takeOptionValue(argv, i, arg, "--seat", null);
+    if (seatOpt) {
+      const seat = String(seatOpt.value || "inactive").trim().toLowerCase() || "inactive";
+      if (seat !== "inactive" && seat !== "active") {
+        errors.push(`Invalid --seat "${seat}" (expected inactive|active)`);
+      } else {
+        seatFilter = seat;
+      }
+      i = seatOpt.nextIndex;
+      continue;
+    }
+
+    if (arg === "--help" || arg === "-h") {
+      console.log(USAGE);
+      process.exit(0);
+    }
+    if (arg.startsWith("-")) {
+      errors.push(`Unknown option: ${arg}`);
+      continue;
+    }
+
+    for (const part of arg.split(/[,\s]+/)) {
+      const email = part.trim().toLowerCase();
+      if (!email) continue;
+      if (!email.includes("@")) {
+        errors.push(`Invalid email: ${email}`);
+        continue;
+      }
+      if (!emails.includes(email)) emails.push(email);
+    }
+  }
+
+  if (statusRequested) {
+    const invalid = (tunnelStatuses || []).filter((s) => !KNOWN_TUNNEL_STATUSES.has(s));
+    if (invalid.length > 0) {
+      errors.push(
+        `Invalid --status value(s): ${invalid.join(", ")} (expected ${[...KNOWN_TUNNEL_STATUSES].join("|")})`,
+      );
+      tunnelStatuses = null;
+    }
+  }
+
+  return { emails, tunnelStatuses, seatFilter, errors };
+}
+
+function seatLabel(user) {
+  if (user?.access_seat || user?.gateway_seat) return "active";
+  return "inactive";
+}
+
+function tunnelStatus(tunnel) {
+  if (!tunnel) return "none";
+  return String(tunnel.status || "unknown").toLowerCase();
+}
+
+async function listAllPaged(url, headers) {
+  const items = [];
+  let page = 1;
+  for (;;) {
+    const sep = url.includes("?") ? "&" : "?";
+    const { res, data } = await cfJson(`${url}${sep}page=${page}&per_page=100`, { headers });
+    if (!data?.success && res.status !== 200) {
+      const message = data?.errors?.[0]?.message || `HTTP ${res.status}`;
+      return { ok: false, error: message, items: [] };
+    }
+    const batch = Array.isArray(data?.result) ? data.result : [];
+    items.push(...batch);
+    const totalPages = Number(data?.result_info?.total_pages || 1);
+    if (batch.length === 0 || page >= totalPages) break;
+    page += 1;
+  }
+  return { ok: true, items };
+}
+
+async function selectEmailsByFilters(accountApi, headers, options = {}) {
+  const tunnelStatuses = Array.isArray(options.tunnelStatuses) ? options.tunnelStatuses : null;
+  const seatFilter = options.seatFilter || null;
+  const emailFilter = options.emailFilter || [];
+
+  const usersList = await listAllPaged(`${accountApi}/access/users`, headers);
+  if (!usersList.ok) {
+    return { emails: [], error: `Failed to list Access users: ${usersList.error}` };
+  }
+
+  let tunnelsByName = new Map();
+  if (tunnelStatuses) {
+    const tunnelsList = await listAllPaged(
+      `${accountApi}/cfd_tunnel?is_deleted=false`,
+      headers,
+    );
+    if (!tunnelsList.ok) {
+      return { emails: [], error: `Failed to list tunnels: ${tunnelsList.error}` };
+    }
+    for (const tunnel of tunnelsList.items) {
+      const name = String(tunnel?.name || "");
+      if (!name) continue;
+      const list = tunnelsByName.get(name) || [];
+      list.push(tunnel);
+      tunnelsByName.set(name, list);
+    }
+  }
+
+  const filterSet =
+    Array.isArray(emailFilter) && emailFilter.length > 0
+      ? new Set(emailFilter.map((e) => String(e).toLowerCase()))
+      : null;
+  const statusSet = tunnelStatuses ? new Set(tunnelStatuses) : null;
+
+  const emails = [];
+  const seen = new Set();
+  for (const user of usersList.items) {
+    const email = String(user?.email || "").trim().toLowerCase();
+    if (!email || !email.includes("@")) continue;
+    if (filterSet && !filterSet.has(email)) continue;
+    if (seatFilter && seatLabel(user) !== seatFilter) continue;
+    if (statusSet) {
+      const tunnelName = `${TUNNEL_PREFIX}${usernameFromEmail(email)}`;
+      const matches = tunnelsByName.get(tunnelName) || [];
+      const status = tunnelStatus(matches[0] || null);
+      if (!statusSet.has(status)) continue;
+    }
+    if (seen.has(email)) continue;
+    seen.add(email);
+    emails.push(email);
+  }
+
+  if (filterSet) {
+    const missing = [...filterSet].filter((email) => !seen.has(email));
+    if (missing.length > 0) {
+      console.warn(
+        `Skipping ${missing.length} email(s) not matching filters (or not found):\n  ${missing.join("\n  ")}`,
+      );
+    }
+  }
+
+  return { emails, error: null };
+}
+
+async function deprovisionOneUser(accountApi, headers, email) {
+  const username = usernameFromEmail(email);
+  const tunnelName = `MyHomeGames-${username}`;
+  const apiHostname = `${username}${USER_TUNNEL_HOST_SUFFIX}`;
+  const moonlightHostname = `${username}${USER_MOONLIGHT_HOST_SUFFIX}`;
+
+  console.log(`Deprovisioning ${email}`);
+  console.log(`  username: ${username}`);
+  console.log(`  tunnel:   ${tunnelName}`);
+  console.log(`  dns:      ${apiHostname}, ${moonlightHostname}`);
+
+  const access = await deleteAccessIdentity(accountApi, headers, email);
+  const dns = {
+    api: await deleteDnsCname(ZONE_ID, headers, apiHostname),
+    moonlight: await deleteDnsCname(ZONE_ID, headers, moonlightHostname),
+  };
+  const tunnels = await deleteTunnels(accountApi, headers, tunnelName);
+
+  return {
+    ok:
+      access.ok &&
+      (dns.api.deleted || dns.api.reason === "not_found") &&
+      (dns.moonlight.deleted || dns.moonlight.reason === "not_found") &&
+      (tunnels.length === 0 || tunnels.every((t) => t.deleted)),
+    email,
+    username,
+    tunnelName,
+    access,
+    dns,
+    tunnels,
+  };
+}
 
 function loadEnvFile(filePath) {
   if (!existsSync(filePath)) return;

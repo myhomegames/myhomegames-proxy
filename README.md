@@ -110,6 +110,14 @@ Do **not** put TURN key/token in `myhomegames-server` `.env` or release packages
 cp .env.example .env
 # edit .env → MYGAMES_CF_API_TOKEN=...  (same as Worker secret MYGAMES_CF_API_TOKEN)
 npm run deprovision-user -- user@example.com
+npm run deprovision-user -- a@example.com b@example.com c@example.com
+# by tunnel STATUS column from list-users (default: inactive)
+npm run deprovision-user -- --status
+npm run deprovision-user -- --status inactive
+npm run deprovision-user -- --status down
+npm run deprovision-user -- --status down,inactive,none
+# by Zero Trust SEAT column
+npm run deprovision-user -- --seat inactive
 npm run list-users
 
 # Browser UI (needs Cloudflare Access session on myhomegames-server.vige.it):
