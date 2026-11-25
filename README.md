@@ -29,8 +29,8 @@ Single Cloudflare Worker (`worker.js`): tunnel provisioning + IGDB/Twitch and Op
 |-------|---------|
 | `myhomegames-server.vige.it/*` | Landing + `/api/get-token` + device pairing + `/api/turn-ice-servers` + `/api/deprovision-user` |
 | `*-myhomegames-server.vige.it/igdb/*` | Inject Twitch headers, forward to Node |
-| `*-myhomegames-server.vige.it/games/import-from-folder*` | Inject OpenAI headers, forward to Node |
-| `*-myhomegames-server.vige.it/games/pick-import-folder*` | Inject OpenAI headers, forward to Node |
+| `*-myhomegames-server.vige.it/games/import-from-folder*` | Inject OpenAI + Twitch headers, forward to Node |
+| `*-myhomegames-server.vige.it/games/pick-import-folder*` | Inject OpenAI + Twitch headers, forward to Node |
 | `*-myhomegames-server.vige.it/settings*` | Inject AI-configured flag (no key in JSON), forward to Node |
 | Other paths on `<user>-myhomegames-server.vige.it` | Direct to tunnel → Node (no worker) |
 | `<user>-moonlight-web.vige.it` | Direct to tunnel → Moonlight Web `:8080` (no worker) |
@@ -166,14 +166,15 @@ Other API paths on the same host (e.g. `/library`, `/collections`) bypass the wo
 
 ---
 
-## OpenAI folder import (`/games/import-from-folder`, `/games/pick-import-folder`, `/settings`)
+## Folder import (`/games/import-from-folder`, `/games/pick-import-folder`, `/settings`)
 
-Same pattern as Twitch/IGDB: the Worker holds one shared OpenAI-compatible key for every tunnel user. Browsers never receive the secret.
+Same pattern as Twitch/IGDB: the Worker holds shared secrets for every tunnel user. Browsers never receive them.
 
 1. **Strips** any client-sent `X-OpenAI-Api-Key` / `X-OpenAI-Base-Url` / `X-OpenAI-Model` (anti-spoofing).
-2. **Injects** credentials from Worker secrets (`OPENAI_API_KEY`, optional `OPENAI_BASE_URL` / `OPENAI_MODEL`).
-3. **Forwards** to the user tunnel → Node. Import routes require the key (`500` if missing).
-4. **`/settings`**: injects only `X-MHG-Ai-Configured: true|false` so the SPA can show/hide Import without leaking the key in JSON.
+2. **Injects** OpenAI credentials from Worker secrets (`OPENAI_API_KEY`, optional `OPENAI_BASE_URL` / `OPENAI_MODEL`).
+3. **Injects** Twitch credentials (`X-Twitch-Client-Id` / `X-Twitch-Client-Secret`) on import/pick routes so the home server can search IGDB the same way as single-game add via `/igdb/*`.
+4. **Forwards** to the user tunnel → Node. Import routes require the OpenAI key (`500` if missing). Twitch injection is best-effort (if secrets missing, import still runs but without catalog match).
+5. **`/settings`**: injects only `X-MHG-Ai-Configured: true|false` so the SPA can show/hide Import without leaking the key in JSON (no Twitch headers).
 
 ### Errors
 
@@ -198,7 +199,8 @@ Same pattern as Twitch/IGDB: the Worker holds one shared OpenAI-compatible key f
         → inject Twitch headers → tunnel → Node
 
 [App] → worker @ luca-myhomegames-server.vige.it/games/import-from-folder
-        → inject OpenAI headers → tunnel → Node
+        → inject OpenAI + Twitch headers → tunnel → Node
+        (AI folders + IGDB enrichment, same Twitch secrets as /igdb/*)
 
 [App] → luca-myhomegames-server.vige.it/library, /collections, …
         → tunnel → Node (no worker)
