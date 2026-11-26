@@ -29,8 +29,11 @@ export async function forwardIgdbToTunnel(request, env, tunnelHost, pathnameOver
 
   const target = new URL(igdbPath + search, originBase(env, tunnelHost));
   const headers = new Headers(request.headers);
+  headers.delete("X-Twitch-Client-Id");
+  headers.delete("X-Twitch-Client-Secret");
   headers.delete("X-MHG-Tunnel-Host");
-  applyTwitchCredentialHeaders(headers, env);
+  if (env.TWITCH_CLIENT_ID) headers.set("X-Twitch-Client-Id", env.TWITCH_CLIENT_ID);
+  if (env.TWITCH_CLIENT_SECRET) headers.set("X-Twitch-Client-Secret", env.TWITCH_CLIENT_SECRET);
 
   return fetch(new Request(target.toString(), {
     method: request.method,
@@ -38,20 +41,6 @@ export async function forwardIgdbToTunnel(request, env, tunnelHost, pathnameOver
     body: request.body ?? undefined,
     redirect: "manual",
   }));
-}
-
-/**
- * Strip client-spoofed Twitch headers, then inject Worker secrets.
- * Used by /igdb/* and by folder-import (same IGDB enrichment as single-game add).
- */
-export function applyTwitchCredentialHeaders(headers, env) {
-  headers.delete("X-Twitch-Client-Id");
-  headers.delete("X-Twitch-Client-Secret");
-  const clientId = String(env.TWITCH_CLIENT_ID || "").trim();
-  const clientSecret = String(env.TWITCH_CLIENT_SECRET || "").trim();
-  if (clientId) headers.set("X-Twitch-Client-Id", clientId);
-  if (clientSecret) headers.set("X-Twitch-Client-Secret", clientSecret);
-  return Boolean(clientId && clientSecret);
 }
 
 export function isIgdbPath(pathname) {
